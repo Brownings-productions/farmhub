@@ -7,3 +7,8 @@ config/satellites.toml
 *.jsonl
 /corpus/
 /cad/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+/logs/
+/data/

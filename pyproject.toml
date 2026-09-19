@@ -1,0 +1,68 @@
+[project]
+name = "farmhub"
+version = "0.1.0"
+description = "Local-first AI hub for a Norwegian homestead."
+readme = "README.md"
+authors = [{ name = "Henry Berven", email = "henber00@gmail.com" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "structlog>=24",
+    "typer>=0.12",
+]
+
+[project.scripts]
+farmhub = "farmhub.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2",
+    "mypy>=1.10",
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E722 (bare except) and BLE001 (blind except) enforce SPEC §12 "no bare except".
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "BLE", "S", "SIM", "RUF", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.importlinter]
+root_package = "farmhub"
+
+# Phased per docs/DECISIONS.md: core isolation now. The module-independence contract
+# is added once two modules exist, the vLLM-import ban once modules/llm exists.
+[[tool.importlinter.contracts]]
+name = "core does not import the rest of farmhub"
+type = "forbidden"
+source_modules = ["farmhub.core"]
+forbidden_modules = [
+    "farmhub.app",
+    "farmhub.api",
+    "farmhub.orchestrator",
+    "farmhub.modules",
+    "farmhub.storage",
+]
