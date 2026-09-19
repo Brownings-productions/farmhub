@@ -1,0 +1,17 @@
+# FarmHub configuration example. Copy to config/farmhub.toml (gitignored).
+#
+# Layering, lowest to highest precedence:
+#   code defaults < this file < FARMHUB_* environment < CLI flags
+# Unknown keys, and misspelled FARMHUB_* variables, are rejected at startup.
+# Check a file with:  farmhub --config config/farmhub.toml config check
+#
+# LLM model ids and per-model profiles arrive with M1 (SPEC §2: verify the exact
+# Hugging Face repository ids first, and record them here and in docs/DECISIONS.md).
+
+# SPEC §3.8. The code default is true and never changes. Production sets it to false
+# explicitly (from M7); startup then logs a warning.
+dry_run = true
+
+[logging]
+level = "INFO"
+file = "logs/farmhub.jsonl"
