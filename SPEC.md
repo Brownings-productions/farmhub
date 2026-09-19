@@ -274,17 +274,17 @@ class Tier(IntEnum):
     READ = 0
     COMFORT = 1
     CONFIRMED = 2
-    FORBIDDEN = 3        # never returned to the model; exists so config can express it
+    FORBIDDEN = 3  # never returned to the model; exists so config can express it
 
 
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
     description: str
-    parameters: dict                  # JSON Schema, strict, no additionalProperties
+    parameters: dict  # JSON Schema, strict, no additionalProperties
     tier: Tier
     handler: Callable[[ToolCall, ToolContext], Awaitable[ToolResult]]
-    allowed_scopes: frozenset[str]    # satellite areas, or {"*"}
+    allowed_scopes: frozenset[str]  # satellite areas, or {"*"}
     timeout_s: float = 10.0
     reads_untrusted_content: bool = False
 ```
