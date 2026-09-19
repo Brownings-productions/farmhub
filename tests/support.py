@@ -1,5 +1,6 @@
 """Shared test doubles: audit sinks, tools and a stub module."""
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -64,6 +65,8 @@ def make_tool(
     result: ToolResult | None = None,
     raises: Exception | None = None,
     scopes: frozenset[str] = frozenset({"*"}),
+    timeout_s: float = 10.0,
+    delay_s: float = 0.0,
     on_call: Callable[[ToolCall, ToolContext], None] | None = None,
 ) -> ToolProbe:
     probe: ToolProbe
@@ -72,6 +75,8 @@ def make_tool(
         probe.calls.append(call)
         if on_call is not None:
             on_call(call, ctx)
+        if delay_s:
+            await asyncio.sleep(delay_s)
         if raises is not None:
             raise raises
         return result if result is not None else ToolResult(ok=True, data={"value": 1})
@@ -83,6 +88,7 @@ def make_tool(
         tier=tier,
         handler=handler,
         allowed_scopes=scopes,
+        timeout_s=timeout_s,
         reads_untrusted_content=untrusted,
     )
     probe = ToolProbe(spec)
