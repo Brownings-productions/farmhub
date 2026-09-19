@@ -113,3 +113,36 @@ Each §9 test lands in the milestone that creates its subject. Checklist kept in
 
 ### 2026-09-19: Per-model LLM profiles
 The config schema carries per-model profiles (model id, quantization, `gpu_memory_utilization`, `max_model_len`), including a single-GPU profile with a smaller model. The §2 numbers were wrong (about 30 GB of FP8 weights exceed 0.90 x 32 GB). The model settles at M1. First candidate is the same model in NVFP4, evaluated on tool-call fidelity and part numbers. **Recorded (M1).**
+
+---
+
+## Made while implementing M0
+
+### 2026-09-19: Gateway ordering and edge cases
+Order: resolve the tool, write the INTENT row (failure means deny, nothing runs), decide, run or deny, write the OUTCOME row. Denial reasons are checked in this order: unknown tool, T3, module not running, T1+ (denied until the M6 policy exists). T0 scope filtering is deliberately not in the M0 gateway: it arrives with the M6 policy. A handler exception or timeout is an `executed` outcome with `ok=false` and a generic error for the model (exception text is logged, not shown). If the OUTCOME row cannot be written after the call ran, the real result is still returned and a critical log line carries the row, because hiding an executed action would misreport what happened. Audit payloads (arguments, results) are capped at 4096 serialized characters and replaced by a truncation marker beyond that. Refines §3.7. **In force (M0).**
+
+### 2026-09-19: `UnconfiguredAuditSink`
+Until a real sink exists, `build_app` uses a sink that refuses every write, so the gateway denies every call. This is the fail-closed reading of "audit write failure means deny" and means M0 cannot run a tool by accident. **In force (M0).**
+
+### 2026-09-19: Handler sealing
+`ToolSpec` wraps its handler so it only runs when the `ToolContext` carries the gateway's seal. Python cannot make this private, so `tests/safety/test_gateway_only.py` also fails if any source file except `core/protocols.py` and `core/gateway.py` reads `.handler` or references `GATEWAY_SEAL`. **In force (M0).**
+
+### 2026-09-19: `ToolSpec.parameters` is validated at construction
+It must be an object schema with `additionalProperties: false` (§6, §7), otherwise `ConfigError`. Full per-parameter rules (bounds, `required`) arrive with the tool loader at M5/M6. **In force (M0).**
+
+### 2026-09-19: Registry behaviour beyond the SPEC
+- `find_tool` (gateway only) returns any registered tool including T3 and tools of degraded modules, so a denial is audited with the correct tier. `available_tools` never lists T3 and only lists RUNNING modules.
+- Known limitation: a module that is degraded from its very first start has never returned its tools, so a call to one of them is audited as an unknown tool. It is still denied.
+- The registry calls `Module.shutdown()` after a failed or degraded startup and before each retry, so modules must make `shutdown` idempotent. An unexpected (non-dependency) error during a retry marks the module FAILED and stops retrying.
+- Periodic health polling of running modules is deferred to M1, when the first real module needs it. Modules can already call `mark_unhealthy`.
+
+**In force (M0).**
+
+### 2026-09-19: Misspelled `FARMHUB_*` variables fail startup
+pydantic-settings silently ignores unknown top-level environment variables, so `FARMHUB_DRY_RUM=false` would leave the default in force unnoticed. `load_settings` rejects any `FARMHUB_*` name that matches no setting, per §7 "fail loudly". **In force (M0).**
+
+### 2026-09-19: The safety-suite guard converts xfail as well as skip
+`tests/safety/conftest.py` marks skipped and xfailed reports as failed and clears `wasxfail`. Without clearing it, pytest still filed an xfail under "xfailed" and exited 0 while printing "1 failed"; `tests/unit/test_safety_conftest.py` found this. **In force (M0).**
+
+### 2026-09-19: CI workflow action versions are unverified
+`.github/workflows/ci.yml` uses `actions/checkout@v4` and `astral-sh/setup-uv@v6`, written without network access to confirm current versions. Confirm on the first run. **In force (M0).**

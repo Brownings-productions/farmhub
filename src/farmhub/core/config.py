@@ -8,6 +8,7 @@ Safety-relevant settings may have fail-safe defaults in code (docs/DECISIONS.md,
 and printed by ``farmhub config check``.
 """
 
+import os
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -66,14 +67,43 @@ class Settings(BaseSettings):
         return {"dry_run": self.dry_run}
 
 
+def _valid_env_names(model: type[BaseModel], prefix: str, delimiter: str) -> set[str]:
+    """Every environment variable name ``model`` accepts, upper-cased."""
+    names: set[str] = set()
+    for name, field in model.model_fields.items():
+        full = f"{prefix}{name}".upper()
+        names.add(full)
+        if isinstance(field.annotation, type) and issubclass(field.annotation, BaseModel):
+            names |= _valid_env_names(field.annotation, f"{full}{delimiter}", delimiter)
+    return names
+
+
+def _check_env_typos(env: Mapping[str, str]) -> None:
+    """Reject FARMHUB_* variables that match no setting.
+
+    pydantic-settings ignores unknown top-level variables, so a typo such as
+    ``FARMHUB_DRY_RUM`` would silently leave the default in force. SPEC §7: fail loudly.
+    """
+    prefix = str(Settings.model_config.get("env_prefix", ""))
+    delimiter = str(Settings.model_config.get("env_nested_delimiter", "__"))
+    valid = _valid_env_names(Settings, prefix, delimiter)
+    unknown = sorted(
+        k for k in env if k.upper().startswith(prefix.upper()) and k.upper() not in valid
+    )
+    if unknown:
+        raise ConfigError(f"unknown environment variable(s): {', '.join(unknown)}")
+
+
 def load_settings(
-    config_path: Path | None = None, overrides: Mapping[str, Any] | None = None
+    config_path: Path | None = None,
+    overrides: Mapping[str, Any] | None = None,
 ) -> Settings:
     """Load and validate settings.
 
     ``config_path`` names an explicit TOML file, which must exist. When omitted, the
     default ``config/farmhub.toml`` is used if present. ``overrides`` are the CLI layer.
     """
+    _check_env_typos(os.environ)
     if config_path is not None and not config_path.is_file():
         raise ConfigError(f"config file not found: {config_path}")
     toml_path = config_path if config_path is not None else DEFAULT_CONFIG_PATH

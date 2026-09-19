@@ -75,3 +75,11 @@ async def test_t3_tools_are_never_model_visible() -> None:
     await registry.startup(make_app_context())
     assert Tier.FORBIDDEN not in {t.tier for t in registry.available_tools()}
     await registry.shutdown()
+
+
+def test_misspelled_safety_env_var_fails_startup_instead_of_being_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FARMHUB_DRY_RUM", "false")
+    with pytest.raises(ConfigError):
+        load_settings()

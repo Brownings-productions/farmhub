@@ -82,3 +82,23 @@ def test_warning_when_dry_run_is_off() -> None:
     with capture_logs() as logs:
         log_effective_safety_settings(settings, structlog.get_logger())
     assert any(e["event"] == "dry_run_disabled" and e["log_level"] == "warning" for e in logs)
+
+
+def test_unknown_farmhub_env_var_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FARMHUB_DRY_RUM", "false")
+    with pytest.raises(ConfigError, match="FARMHUB_DRY_RUM"):
+        load_settings()
+
+
+def test_unknown_nested_env_var_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FARMHUB_LOGGING__LEVL", "DEBUG")
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_known_env_vars_are_accepted_in_any_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("farmhub_dry_run", "false")
+    monkeypatch.setenv("FARMHUB_LOGGING__LEVEL", "DEBUG")
+    settings = load_settings()
+    assert settings.dry_run is False
+    assert settings.logging.level == "DEBUG"
