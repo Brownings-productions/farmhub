@@ -2,7 +2,29 @@
 
 A local-first AI hub for a Norwegian homestead: RAG over farm documents, voice satellites, Home Assistant control, web lookups, and parametric CAD generation. Single Python spine, pluggable modules.
 
-Version 1.1. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+Version 1.2. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+
+---
+
+## Changes in v1.2
+
+Folds in the decisions of the M0 review (2026-09-19; see `docs/DECISIONS.md`). Two changes **amend the letter of §3** and need explicit acceptance: row 3 (the satellite confirmation form no longer always carries a UUID) and row 8 (dry-run no longer blocks local effects).
+
+| # | Section | Change |
+|---|---------|--------|
+| 1 | §3 intro, §3.2, §3.11, §5, §8.1 | The gateway (`core/gateway.py`) is the single enforcement point for every tool call. Modules supply handlers and clients only. Handlers are sealed so they cannot run except through it. |
+| 2 | §3.1, §7 | HA-actuating tools are TOML script wrappers; non-HA tools (records, cad) are Python `ToolSpec`s through the same gateway. Parameters are enums or bounded numbers, never free-text entity or service arguments. T3 declarations are status-only. |
+| 3 | §3.3, §14 Q6 | **Amends §3.3.** Voice confirmation may use a fixed HA intent that carries no UUID. `confirmers` are per area. PendingActions live in Postgres with atomic resolution, are expired and audited at startup, and duplicate HA events are idempotent. |
+| 4 | §3.4 | `max_runtime_s` in the tool TOML, RUNBOOK checklist for the HA side, and the assumption that the non-admin HA user does not restrict service calls. |
+| 5 | §3.5, §4, §8.1, §8.5 | New rule 4: action turns receive only the current utterance, never replayed history. `query_service_history` is untrusted; free-text T0 results are typed-and-stripped or marked untrusted. |
+| 6 | §3.6, §13 | Sessions are minted server-side and bound to the authenticated identity; service-to-service bearer token; client-supplied tools and system prompts are ignored; effective tools = tier ≤ ceiling AND scope intersection; `"*"` rejected on T2 tools. |
+| 7 | §3.7 | Audit semantics: intent row then one outcome row per call, denials audited, unknown tools recorded with a null tier, audit failure denies, immutability mechanism. |
+| 8 | §3.8 | **Amends §3.8.** Dry-run blocks external side effects only; local effects proceed with `dry_run=true` in the audit row. T2 still creates a PendingAction. The code default is ON permanently; production turns it off explicitly. Settable from every layer. |
+| 9 | §3.9, §14 Q7 | The printer upload client never sends a start flag or enables auto-start. |
+| 10 | §2 | GPU numbers corrected (the FP8 weights exceed 0.90 × 32 GB). Config carries per-model profiles, including a single-GPU profile with a smaller model. |
+| 11 | §5, §6, §7, §12 | Composition root (`app.py`) holds the module list. Failure policy: invalid config fails fast, an unavailable dependency starts the module degraded. Fail-safe defaults are logged; unknown keys and misspelled `FARMHUB_*` variables fail startup; optional parameters become required-but-nullable. |
+| 12 | §9, §11 | Each §9 test lands in the milestone that creates its subject (`docs/SAFETY_CHECKLIST.md`); new tests added; M6 no longer claims all of §9. |
+| 13 | §14 | Added Q6 (voice confirmation, M8), Q7 (printer stack, M12), Q8 (audit sink composition, M2); Q1 extended. |
 
 ---
 
@@ -68,17 +90,19 @@ ha is a separate physical machine on purpose. Heating and pumps must keep workin
 
 Hard rule enforced in config: the 5090 serves the LLM and nothing else.
 
-- `CUDA_VISIBLE_DEVICES=0` → vLLM. `gpu_memory_utilization: 0.90`.
+- `CUDA_VISIBLE_DEVICES=0` → vLLM, configured by a model profile (below).
 - `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB of 8 GB.
 
-If only one GPU is present, config must degrade gracefully: drop vLLM to `gpu_memory_utilization: 0.55`, load auxiliary models onto the same device, log a warning at startup. Never silently OOM.
+Config carries per-model profiles: model id, quantization, `gpu_memory_utilization` and `max_model_len`. None of these is hard-coded. A profile is valid only if the weights plus KV cache fit its budget, which is verified at M1: the ~30 GB of FP8 weights for the primary model exceed 0.90 × 32 GB, so the 5090 profile needs a different quantization or a verified higher utilization.
+
+If only one GPU is present, config selects a single-GPU profile with a smaller model, loads auxiliary models onto the same device, and logs a warning at startup. Lowering the utilization of the same model is not a valid degradation. Never silently OOM.
 
 ### Models
 
 | Role | Model | Notes |
 |------|-------|-------|
-| LLM | Qwen3-30B-A3B-Instruct, FP8 | MoE, ~3B active. Chosen for tool calling. ~30 GB fits the 5090 |
-| LLM fallback | Mistral-Small-3.2-24B-Instruct, AWQ | Config switch only |
+| LLM | Qwen3-30B-A3B-Instruct, FP8 | MoE, ~3B active. Chosen for tool calling. ~30 GB of weights; fit with KV cache is verified at M1 (see profiles) |
+| LLM fallback | Mistral-Small-3.2-24B-Instruct, AWQ | Profile switch only |
 | STT | faster-whisper large-v3, `int8_float16` | CTranslate2. This compute type requires CUDA |
 | TTS | Piper | CPU, on hub, served over Wyoming. Satellites only play audio |
 | Embeddings | BAAI/bge-m3 | Dense + sparse from one model |
@@ -86,7 +110,7 @@ If only one GPU is present, config must degrade gracefully: drop vLLM to `gpu_me
 
 **Before M1:** verify the exact Hugging Face repository IDs for the LLM and fallback (current releases carry date suffixes, and FP8/AWQ variants may be separate repos), and record them in `config/farmhub.example.toml` and `docs/DECISIONS.md`. Model IDs live only in config, never in code.
 
-FP8 rather than 4-bit because the 5090 has the VRAM for it and quantization damage shows up first on exactly the things this system does: part numbers, torque figures, tool-call argument fidelity. If VRAM becomes tight, try NVFP4 before falling back to AWQ.
+Higher precision is preferred over 4-bit because quantization damage shows up first on exactly the things this system does: part numbers, torque figures, tool-call argument fidelity. Because the FP8 weights leave little or no room for KV cache on a 32 GB card, the first candidate to evaluate at M1 is the same model in NVFP4, judged on tool-call fidelity and part numbers. AWQ is the fallback.
 
 ### Inference backend
 
@@ -98,70 +122,83 @@ The application talks to the LLM only through an `LLMBackend` protocol implement
 
 These are acceptance criteria. Write tests in `tests/safety/` that fail if any is violated.
 
+The gateway (`core/gateway.py`) is the single enforcement point for every tool call: tier, scope, rate limit, taint, dry-run, audit and PendingAction lifecycle. Modules supply handlers and clients only, and no handler can run except through the gateway.
+
 ### 3.1 No generic actuation primitive
 
-There must be no tool of the form `call_service(domain, service, entity_id, data)` or any equivalent that lets the model reach arbitrary Home Assistant entities. Every actuation tool is a named, typed, individually-declared tool backed by one specific HA script.
+There must be no tool of the form `call_service(domain, service, entity_id, data)` or any equivalent that lets the model reach arbitrary Home Assistant entities. Every HA-actuating tool is a named, typed, individually-declared TOML wrapper around one specific HA script (§7). Parameters are enums or bounded numbers only, never free-text entity or service arguments: a tool with a free-text `scene` or `entity` argument is `call_service` by another name. Non-HA tools (records, cad) are Python `ToolSpec`s and pass through the same gateway.
 
 ### 3.2 Capability tiers
 
-Every tool declares a tier. The bridge enforces tiers server-side. Model output is never trusted to respect them.
+Every tool declares a tier. The gateway enforces tiers server-side. Model output is never trusted to respect them.
 
 - **T0 READ** — see §8.1 for the full list. Auto-execute, always available (subject to §3.5 and §3.6).
 - **T1 COMFORT** — indoor lights, scenes, media, notifications, logging a service record. Auto-execute. Logged.
 - **T2 CONFIRMED** — greenhouse watering, garden and field irrigation, ventilation, CAD generation and slicing. The model may propose; execution requires explicit human confirmation per §3.3.
-- **T3 FORBIDDEN** — heating, well and pressure pumps, anything affecting livestock, mains electrical, starting a 3D print. Never exposed to the LLM in any form. Read-only status is permitted (asking whether the barn heating is on is fine). Control lives exclusively in deterministic Home Assistant automations and fixed HA intents, so it still works by voice — just not through the model, and not when hub is down.
+- **T3 FORBIDDEN** — heating, well and pressure pumps, anything affecting livestock, mains electrical, starting a 3D print. Never exposed to the LLM in any form. Read-only status is permitted (asking whether the barn heating is on is fine). Control lives exclusively in deterministic Home Assistant automations and fixed HA intents, so it still works by voice — just not through the model, and not when hub is down. A T3 declaration is status-only: the loader rejects any T3 entry that carries an actuating handler or script.
 
 Rationale to preserve: heating protects pipes from freezing, and a pump can flood a building or drain the well that also supplies the house. Neither may depend on a language model's judgement.
 
 ### 3.3 Confirmation flow for T2
 
-A T2 tool call returns a `PendingAction` with a UUID and a TTL of 120 seconds. The PendingAction records the originating satellite, session, scope, tool, and exact arguments. It executes only after a matching confirmation arrives through one of two channels. Expired actions are discarded.
+A T2 tool call returns a `PendingAction` with a UUID and a TTL of 120 seconds. The PendingAction records the originating satellite, session, scope, tool, and exact arguments, and is stored in Postgres. Resolution (confirmed, denied or expired) is an atomic conditional UPDATE, so each PendingAction resolves exactly once and a duplicate HA event is idempotent. All pending rows are expired and audited at startup. A resolution is its own audited call (§3.7). It executes only after a matching confirmation arrives through one of two channels. Expired actions are discarded.
 
-**Satellite confirmation.** A structured confirm callback carrying the UUID, arriving from the same satellite session that created the action.
+**Satellite confirmation.** Either (a) a structured confirm callback carrying the UUID, arriving from the same session that created the action, or (b) for voice, a fixed Home Assistant intent ("confirm" / "bekreft"), handled deterministically by HA and never interpreted by the model, which calls the FarmHub confirm endpoint with the satellite's `device_id`. Form (b) confirms the single pending action for that satellite's session; with zero or several pending it does nothing and says so. Form (b) is provisional until Q6 is finalized at M8.
 
 **Push-notification confirmation.** FarmHub sends a Home Assistant actionable notification whose action identifier embeds the UUID. The confirmation arrives as the HA `mobile_app_notification_action` event over the WebSocket connection. It is accepted only if:
 
 - the UUID matches a live, unexpired PendingAction;
-- the originating device is in the `confirmers` allowlist configured for the action's scope (a list of HA mobile-app device IDs); and
+- the originating device is in the `confirmers` allowlist configured for the action's area (a list of HA mobile-app device IDs); and
 - the action has not already been confirmed, denied, or expired (each PendingAction resolves exactly once).
 
 The audit row for the execution records which channel confirmed it and, for push, which device.
 
-Confirmations are never inferred from conversational text such as "yeah go ahead" — require a structured confirm callback carrying the UUID. The arguments executed are the arguments stored in the PendingAction; a confirmation cannot modify them.
+Confirmations are never inferred from conversational text such as "yeah go ahead", or from model output. They require either a structured callback carrying the UUID or the fixed-intent form above. The arguments executed are the arguments stored in the PendingAction; a confirmation cannot modify them.
 
 ### 3.4 Runtime watchdogs live in Home Assistant
 
 Every irrigation, watering and ventilation script has a maximum runtime enforced inside the Home Assistant script itself, not in Python. A hung hub, a crashed process or a bug in this repo must not be able to leave a valve open. Assume the Python side will fail eventually.
 
+Each such tool's TOML declares `max_runtime_s`, the watchdog configured in the HA script. It is validated against the tool's parameter maximums (a parameter may not permit more than the watchdog allows). FarmHub cannot read the HA script body, so `docs/RUNBOOK.md` carries a checklist for the HA side. Assume the non-admin HA user does not restrict which services a token may call (verify at M5): containment rests on the gateway, the HA-side watchdogs and the §10 hardware cutoffs.
+
 ### 3.5 Untrusted content and actuation tools are never in the same context
 
-Document text from the corpus and content fetched from the web are untrusted input. This includes the results of any tool marked `reads_untrusted_content=True` (`search_documents`, `get_news`, `fetch_url`), not only content retrieved by the pipeline before the completion.
+Document text from the corpus and content fetched from the web are untrusted input. This includes the results of any tool marked `reads_untrusted_content=True` (`search_documents`, `get_news`, `fetch_url`, `query_service_history`), not only content retrieved by the pipeline before the completion. Free-text results from any other T0 tool are either typed and stripped to allowlisted fields or the tool is marked untrusted.
 
-Three rules enforce this:
+Four rules enforce this:
 
 1. **Pipeline retrieval.** A completion whose context includes retrieved content must be issued with `tools=[]` or only T0 tools.
 2. **Action turns exclude untrusted tools.** The tool list for an `action` turn contains only T0 tools with `reads_untrusted_content=False`, plus scope-permitted T1 and T2 tools. The model therefore cannot fetch untrusted content mid-turn and then act on it.
 3. **Runtime tripwire.** The orchestrator tracks a per-turn `context_tainted` flag, set whenever untrusted content enters the context by any route. Any completion issued while the flag is set is restricted to T0 tools, and any attempt to execute a T1+ tool while it is set is denied and audited. This is defence in depth: rule 2 should make it unreachable.
+4. **No replayed history in action turns.** An `action` turn receives only the current utterance plus a fixed server-side system prompt. It never receives replayed conversation history, including the follow-up turn of a `mixed` flow, because earlier assistant answers may summarize untrusted content and would launder it into the actuation context.
 
-This blocks prompt injection from a scanned PDF or a web page into the actuation path. Enforce all three with explicit assertions in the orchestrator, and test them.
+This blocks prompt injection from a scanned PDF or a web page into the actuation path. Enforce all four with explicit assertions in the orchestrator, and test them.
 
 ### 3.6 Satellite scope is server-side
 
-Satellite identity comes from the Wyoming connection or the HA `device_id`, and the bridge derives the allowed tool set from it. The model never supplies its own location, area or scope as a tool argument. The workshop satellite cannot actuate greenhouse valves.
+Satellite identity comes from the Wyoming connection or the HA `device_id`, authenticated at the endpoint, and the gateway derives the allowed tool set from it. The model never supplies its own location, area or scope as a tool argument. The workshop satellite cannot actuate greenhouse valves.
+
+Sessions are minted server-side and bound to the authenticated satellite identity; HA's `conversation_id` is a lookup key only, never trusted alone. `/v1/chat/completions` and the confirm endpoint require a shared service-to-service bearer token, listen on a configurable bind address and are firewalled to the `ha` host. FarmHub ignores client-supplied `tools` and system prompts and builds its own. Transport details settle with Q1 (M1).
+
+Each satellite has a home area, a scope (the set of areas it may act on) and a tier ceiling that may not exceed T2. The effective tools are those with tier ≤ the satellite's ceiling AND `allowed_scopes` intersecting its scope. `"*"` is rejected in `allowed_scopes` for T2 tools. `confirmers` are configured per area.
 
 **Fail closed.** A request that arrives without a satellite identity, or with one not present in the satellite registry, is served with T0 tools only (trusted and untrusted T0, per §3.5), and the condition is logged as a warning. Identity is never taken from message content.
 
 ### 3.7 Audit log
 
-Every tool invocation writes an immutable row: timestamp, satellite, session, tool name, tier, arguments, decision (executed / denied / pending / expired), result, duration, and for T2 the confirmation channel and confirming device. Append-only table plus a JSONL file. No tool call may execute without producing an audit row.
+Every tool invocation is audited, denials included. A call writes an immutable INTENT row before anything runs, then exactly one OUTCOME row, linked by `call_id`. Fields: timestamp, satellite, session, tool name, tier, arguments, decision (executed / denied / pending / expired), result, duration, `dry_run`, and for T2 the confirmation channel and confirming device. A T2 confirmation or expiry is its own call whose `parent_call_id` is the proposing call. An unknown tool is recorded with the name as given (truncated) and a null tier.
+
+If the intent row cannot be written, the call is denied and nothing runs. If the outcome row cannot be written after a call already ran, the real result is still returned and a critical log line carries the row. Append-only table plus a JSONL file: the table's database role has no UPDATE or DELETE and a trigger rejects them; the JSONL file is append-only by convention (a hash chain is deferred). No tool call may execute without producing an audit row. How the two sinks combine when Postgres is down is Q8.
 
 ### 3.8 Dry run
 
-A global `--dry-run` flag and `FARMHUB_DRY_RUN` env var. In dry-run mode, every tool at T1 and above logs its intended call and returns a simulated success. No HTTP or WebSocket service call reaches Home Assistant. Default this on until milestone M7.
+A global `--dry-run` flag and `FARMHUB_DRY_RUN` env var, also settable in `farmhub.toml`; the effective value is logged at startup. The default in code is ON and never changes. Production config turns it off explicitly (from M7), and startup logs a warning whenever it is off.
+
+In dry-run mode, every tool at T1 and above with an external side effect (Home Assistant service calls, notifications, printer uploads) logs its intended call and returns a simulated success. No HTTP or WebSocket service call reaches Home Assistant and nothing reaches the printer. Local effects (service-event writes, sandbox runs) proceed, with `dry_run=true` in the audit row. T2 tools still create a PendingAction and require confirmation; push notifications are simulated and confirmations come from the test harness.
 
 ### 3.9 3D printing
 
-Slicing and upload to the printer queue are permitted. Starting a print is not. Unattended ignition risk, and the bed may not be clear. The pipeline ends at "file uploaded, notification sent." There is no tool, flag or config option that starts a print.
+Slicing and upload to the printer queue are permitted. Starting a print is not. Unattended ignition risk, and the bed may not be clear. The pipeline ends at "file uploaded, notification sent." There is no tool, flag or config option that starts a print. The printer upload client is a fixed call that never sends a start or print flag and never enables an auto-start queue, and a test asserts this (Q7 picks the printer stack).
 
 ### 3.10 Sandboxing generated code
 
@@ -169,7 +206,7 @@ The cad module executes LLM-written CadQuery/OpenSCAD source. It runs in a subpr
 
 ### 3.11 Rate limits
 
-Per-tier, per-session limits enforced in the bridge. T2 defaults to 3 proposals per 10 minutes. Denials produce audit rows.
+Per-tier, per-session limits enforced in the gateway. T2 defaults to 3 proposals per 10 minutes. Denials produce audit rows.
 
 ## 4. Request flow
 
@@ -186,11 +223,13 @@ Satellite → HA Assist
         ├── question → retrieve → completion with T0 tools only (§3.5) → answer
         │
         ├── action   → completion with trusted T0 + scope-filtered T1/T2 tools,
-        │               NO retrieved content, NO untrusted tools (§3.5 rule 2)
+        │               NO retrieved content, NO untrusted tools (§3.5 rule 2),
+        │               current utterance only, NO history (§3.5 rule 4)
         │                ├── T1 → execute → audit → respond
         │                └── T2 → PendingAction → ask → await confirm → execute → audit
         │
         └── mixed    → answer first, then offer the action as a separate turn. Never fuse them.
+                       The follow-up turn carries no history from the answer (§3.5 rule 4).
 ```
 
 Home Assistant keeps handling known commands itself. FarmHub is the fallback for open questions, not a replacement for HA's intent system.
@@ -214,17 +253,20 @@ farmhub/
   docs/
     DECISIONS.md
     RUNBOOK.md
+    SAFETY_CHECKLIST.md
   config/
     farmhub.example.toml
-    satellites.example.toml     # satellite registry: name, area, scope, tier ceiling, input mode
+    satellites.example.toml     # satellite registry: name, home area, scope, tier ceiling, input mode
     tools/                      # one TOML file per exposed tool
   src/farmhub/
     __init__.py
     __main__.py
+    app.py                      # composition root: explicit module list and wiring
     core/
       config.py                 # pydantic-settings, layered TOML + env
       context.py                # AppContext: shared clients, no globals
-      registry.py               # module discovery and lifecycle
+      registry.py               # module lifecycle and tool registration (list supplied by app.py)
+      gateway.py                # single enforcement point for every tool call
       protocols.py              # all Protocol definitions
       events.py                 # async pub/sub bus
       audit.py                  # append-only audit sink
@@ -289,15 +331,17 @@ class ToolSpec:
     reads_untrusted_content: bool = False
 ```
 
-Also define: `LLMBackend`, `Retriever`, `Embedder`, `Reranker`, `DocumentParser`, `Chunker`, `ToolContext` (carries satellite, session, scope, dry_run, context_tainted), `ToolResult` (carries an `untrusted: bool` flag the pipeline uses to set `context_tainted`), `PendingAction`, `HealthReport`.
+Also define: `LLMBackend`, `Retriever`, `Embedder`, `Reranker`, `DocumentParser`, `Chunker`, `ToolContext` (carries satellite, session, scope, dry_run, context_tainted), `ToolResult` (carries an `untrusted: bool` flag the pipeline uses to set `context_tainted`), `CallOrigin`, `PendingAction`, `HealthReport`, `AuditEntry` and `AuditSink`. A `ToolSpec` handler is sealed at construction: it refuses to run unless the gateway invoked it (a runtime seal plus a static test).
 
-Modules are registered in an explicit list in `registry.py` — no entry-point scanning. Explicit is easier to reason about when something fails to load at 06:00.
+Modules are registered in an explicit list in the composition root (`app.py`) and passed to `registry.py` — no entry-point scanning, and `core` never imports a module. Explicit is easier to reason about when something fails to load at 06:00.
+
+**Failure policy.** Invalid config, including bad tool files, fails fast for every module: `startup` raises `ConfigError`, already-started modules are stopped and the app exits. A runtime dependency that is unavailable (HA unreachable, database down) raises `DependencyUnavailable`: the module starts degraded, is marked unhealthy, its tools are removed from every tool list, and startup is retried with backoff. A core failure fails fast.
 
 ## 7. Configuration
 
-Layered: defaults in code → `config/farmhub.toml` → environment (`FARMHUB_*`) → CLI flags. Validated by pydantic-settings at startup. Fail loudly and exit on invalid config. No silent defaults for anything safety-relevant.
+Layered: defaults in code → `config/farmhub.toml` → environment (`FARMHUB_*`) → CLI flags. Validated by pydantic-settings at startup. Fail loudly and exit on invalid config. No silent defaults for anything safety-relevant: fail-safe defaults in code are allowed (dry-run on, the T2 rate limit), but their effective values are logged at startup and printed by `farmhub config check`, and values with no safe default (`confirmers`, the satellite registry) are required. Unknown keys in `farmhub.toml` and misspelled `FARMHUB_*` variables fail startup.
 
-Tool exposure is config-driven, one TOML file per tool:
+HA-actuating tools are config-driven, one TOML file per tool. Non-HA tools (records, cad) are Python `ToolSpec`s and go through the same gateway.
 
 ```toml
 name = "start_greenhouse_watering"
@@ -306,6 +350,7 @@ tier = "CONFIRMED"
 ha_script = "script.greenhouse_water_timed"
 allowed_scopes = ["kitchen", "greenhouse"]
 required = ["duration_min"]
+max_runtime_s = 1200
 
 [parameters.duration_min]
 type = "integer"
@@ -318,27 +363,30 @@ Schema generation rules:
 
 - The generated JSON Schema always sets `additionalProperties: false`.
 - `required` must be present and list parameter names explicitly; an empty list is allowed but must be written. A missing `required` key fails validation.
-- Every parameter must declare `type` and `description`. Numeric parameters must declare `minimum` and `maximum`. String parameters must declare either `enum` or `maxLength`.
+- Every parameter must declare `type` and `description`. Numeric parameters must declare `minimum` and `maximum`. String parameters must declare either `enum` or `maxLength`. Parameters are never free-text entity or service names (§3.1).
+- Optional parameters (those not in `required`) are generated as required-but-nullable, so strict JSON-schema modes work.
+- `max_runtime_s` is required on every T2 tool that runs for a duration and is validated against the parameter maximums (§3.4).
+- `"*"` in `allowed_scopes` is rejected on T2 tools (§3.6).
 
-Adding a tool must never require touching Python. A tool file referencing a nonexistent HA script fails validation at startup, not at first use. A tool file declaring `tier = "FORBIDDEN"` is loaded (so config can express it) but is never placed in any model-visible list.
+Adding an HA-actuating tool must never require touching Python. A tool file referencing a nonexistent HA script fails validation at startup, not at first use. A tool file declaring `tier = "FORBIDDEN"` is loaded (so config can express it) but is never placed in any model-visible list. A FORBIDDEN declaration is status-only: the loader rejects one that carries an actuating handler or `ha_script`.
 
 ## 8. Module specifications
 
 ### 8.1 ha — Home Assistant bridge
 
-Carries most of §3. Connects over the HA WebSocket API using a long-lived token scoped to a dedicated non-admin HA user.
+Supplies the Home Assistant half of §3; the gateway enforces it. Connects over the HA WebSocket API using a long-lived token scoped to a dedicated non-admin HA user.
 
-Responsibilities: load tool definitions from `config/tools/`, validate each against the live HA entity and script registry at startup, enforce tier/scope/rate-limit/timeout/dry-run/audit before any service call, manage PendingAction lifecycle including push-notification confirmations (§3.3), filter T3 out of every tool list returned to the model, surface real HA results rather than letting the model narrate success.
+Responsibilities: load tool definitions from `config/tools/`, validate each against the live HA entity and script registry at startup, supply the HA client and PendingAction storage that the gateway uses to enforce tier/scope/rate-limit/timeout/dry-run/audit before any service call, handle push-notification confirmation events (§3.3), and surface real HA results rather than letting the model narrate success. The gateway, not this module, filters T3 out of every tool list returned to the model.
 
 T0 tool list (read-only, always available subject to §3.5):
 
 | Tool | Returns | Untrusted |
 |------|---------|-----------|
-| get_entity_state | Current value of one allowlisted entity | no |
+| get_entity_state | State plus allowlisted typed attributes of one allowlisted entity | no |
 | get_sensor_history | Time series for a sensor, bounded window | no |
-| list_area_status | Summary of one area's sensors in a single call | no |
+| list_area_status | Summary of one area's sensors in a single call (state plus allowlisted typed attributes) | no |
 | search_documents | Chunks with source path, page, heading path | yes |
-| query_service_history | Filtered service events for an asset | no |
+| query_service_history | Filtered service events for an asset | yes |
 | next_service_due | Computed due date or hours | no |
 | list_assets | Known machines and buildings | no |
 | get_weather | Yr / met.no forecast | no |
@@ -346,6 +394,8 @@ T0 tool list (read-only, always available subject to §3.5):
 | fetch_url | Readable text from an allowlisted domain | yes |
 
 `get_weather` is marked trusted because it returns structured numeric data from a single fixed API, parsed into typed fields; no free text from the response reaches the model.
+
+`query_service_history` is marked untrusted because the notes field is speech-to-text. `get_entity_state` and `list_area_status` return the state plus allowlisted typed attributes only, never free-form attribute text.
 
 `get_entity_state` runs against an allowlist, not the whole entity registry. Cameras, presence and device trackers stay out.
 
@@ -405,7 +455,7 @@ Service history is structured data, not RAG. "When did I last change the hydraul
 
 Tables: `asset`, `service_event` (date, hours, type, parts, cost, notes, doc_ref), `consumable`, `reminder`.
 
-T0 tools as listed in §8.1. One T1 tool: `log_service_event(...)` — recording maintenance by voice while your hands are dirty is the single highest-value write in the system.
+T0 tools as listed in §8.1 (`query_service_history` is untrusted). One T1 tool: `log_service_event(...)` — recording maintenance by voice while your hands are dirty is the single highest-value write in the system.
 
 ### 8.6 web
 
@@ -439,7 +489,7 @@ Tools: `generate_model(description, constraints)` at T2 (it runs generated code)
 
 Not a satellite implementation — satellites run `wyoming-satellite` and are configured, not coded. Satellites capture audio and play TTS audio; they do not run Piper or Whisper themselves.
 
-This module is responsible for Whisper STT and Piper TTS as Wyoming services on hub, plus the satellite registry (`config/satellites.toml`): name → area → scope → tier ceiling → input mode → confirmers.
+This module is responsible for Whisper STT and Piper TTS as Wyoming services on hub, plus the satellite registry (`config/satellites.toml`): name → home area → scope (set of areas) → tier ceiling (at most T2) → input mode. `confirmers` are configured per area (§3.3).
 
 Prefer running the upstream `wyoming-faster-whisper` and `wyoming-piper` servers, configured and supervised by this module's deployment files, over reimplementing them. Write custom code only where they fall short, and record why in `docs/DECISIONS.md`.
 
@@ -447,7 +497,7 @@ Workshop satellite: `wake_word: none`, `ptt: gpio`, close-talk headset mic. Far-
 
 ## 9. Testing
 
-`tests/safety/` is mandatory and part of the default test run:
+`tests/safety/` is mandatory, part of the default test run, and never skipped (a skip or xfail there fails the run). Each test lands in the milestone that creates its subject; `docs/SAFETY_CHECKLIST.md` tracks which exist.
 
 - Model-visible tool list contains no T3 tool or entity, under every scope.
 - A turn containing retrieved content is issued with no tool above T0.
@@ -458,13 +508,23 @@ Workshop satellite: `wake_word: none`, `ptt: gpio`, close-talk headset mic. Far-
 - A T2 tool call without confirmation produces no service call to HA.
 - A PendingAction past its TTL is rejected.
 - A confirmation from a different session is rejected.
-- A push confirmation from a device not in the scope's `confirmers` list is rejected.
+- A push confirmation from a device not in the area's `confirmers` list is rejected.
 - A PendingAction cannot be confirmed twice.
 - Scope filtering: the workshop scope cannot reach greenhouse tools.
-- Every executed tool call produced exactly one audit row.
+- Every tool call, denials included, produced an intent row and exactly one outcome row.
+- An unknown tool, a T3 tool and a not-yet-permitted tool are denied and audited (unknown: name as given and truncated, tier null).
+- An audit write failure denies the call and nothing runs.
+- No handler can be invoked except through the gateway.
+- Client-supplied tools and system prompts are ignored.
+- An `action` turn receives no replayed history, including the follow-up turn of a `mixed` flow.
 - Dry-run mode issues zero outbound HA service calls.
 - A tool config referencing a missing HA script fails startup.
 - A tool config missing `required`, or with unbounded numeric or string parameters, fails startup.
+- A T3 declaration with an actuating handler or script fails startup; `"*"` on a T2 tool fails startup; a parameter maximum above `max_runtime_s` fails startup.
+- Unknown config keys and misspelled `FARMHUB_*` variables fail startup; dry-run is on with no configuration.
+- In dry-run a T2 call still creates a PendingAction and needs confirmation.
+- PendingAction rows are expired and audited at startup; a duplicate HA confirmation event is idempotent.
+- The printer upload client never sends a start flag.
 - cad generated code cannot open a network socket.
 
 Integration tests run against a mocked HA WebSocket server and a test-double LLM. Tests needing Postgres use a pgvector-enabled container via testcontainers. No test may require a real GPU — the whole suite must pass on a laptop with Docker.
@@ -489,18 +549,18 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 | # | Milestone | Done when |
 |---|-----------|-----------|
 | M0 | Scaffold: pyproject, config, logging, AppContext, registry, protocols, CI | `farmhub --version` runs, an empty module loads, CI green |
-| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs verified (§2). Satellite identity reaches FarmHub (§14 Q1) |
-| M2 | Storage, migrations, records | Service events insert and query by CLI |
+| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs and a fitting model profile verified (§2). Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
+| M2 | Storage, migrations, records | Service events insert and query by CLI. Audit sink composition decided (Q8) |
 | M3 | ingest: parse, chunk, embed, manifest | Corpus indexes; rerun is a no-op; library check lints |
 | M4 | rag: hybrid retrieval + rerank + search_documents | Cited answers from manuals, with pages |
 | M5 | ha bridge, T0 read-only, audit log | Reports sensor states. Zero write paths exist yet |
-| M6 | Tiers, scopes, rate limits, dry-run, classifier, taint tracking, safety suite | All of §9 passes. Still dry-run by default |
+| M6 | Tiers, scopes, rate limits, dry-run, classifier, taint tracking, safety suite | Every §9 test whose subject exists passes (T2 confirmation tests arrive at M8, the cad sandbox test at M12; see `docs/SAFETY_CHECKLIST.md`). Dry-run is still on |
 | M7 | T1 comfort actions live | Lights work by voice. Audit rows correct |
-| M8 | T2 + PendingAction confirmation flow (satellite and push) | Greenhouse watering works with confirm; TTL expiry and confirmer allowlist tested |
+| M8 | T2 + PendingAction confirmation flow (satellite and push) | Greenhouse watering works with confirm; TTL expiry and confirmer allowlist tested. Voice confirmation form settled (Q6) |
 | M9 | voice: Whisper + Piper services, satellite registry | Kitchen satellite end-to-end |
 | M10 | Workshop PTT satellite | GPIO trigger, no wake word, headset mic |
 | M11 | web: weather, news, allowlisted fetch | Yr forecast by voice |
-| M12 | cad: generate, sandbox, preview, approve, slice, queue | Bracket reaches printer queue. Does not start |
+| M12 | cad: generate, sandbox, preview, approve, slice, queue | Bracket reaches printer queue. Does not start. Printer stack settled (Q7) |
 
 M5 through M8 are where haste causes real damage. Slow down there. Write each §9 test before the code it guards.
 
@@ -508,7 +568,7 @@ Note: nothing before M9 requires dedicated hardware. M0–M8 can be developed ag
 
 ## 12. Standards
 
-- Python 3.12. uv for dependency management. ruff format + lint. mypy --strict on `core/` and all protocol implementations.
+- Python 3.12 (uv-managed, pinned in `.python-version`). uv for dependency management, `uv_build` as the build backend. ruff format + lint. mypy --strict on `core/`, and on each module and protocol implementation as it lands.
 - Async throughout: asyncio, httpx, SQLAlchemy 2.x async, asyncpg.
 - FastAPI + Pydantic v2. structlog. pytest + pytest-asyncio. alembic.
 - No globals. Dependencies flow through AppContext.
@@ -538,14 +598,17 @@ Scheduling uses systemd timers (in `deploy/systemd/`), not a Python scheduler li
 
 ## 13. Out of scope
 
-Do not build: a custom web UI (Home Assistant is the UI), user accounts or auth beyond the HA token, cloud fallback inference, text-to-mesh 3D generation, custom satellite firmware, or anything that starts a 3D print.
+Do not build: a custom web UI (Home Assistant is the UI), user accounts, or auth beyond the HA token and service-to-service bearer tokens, cloud fallback inference, text-to-mesh 3D generation, custom satellite firmware, or anything that starts a 3D print.
 
 ## 14. Open questions
 
 Known unresolved decisions. Raise each one at the milestone named, propose options, and wait for an answer. Record the outcome in `docs/DECISIONS.md` and remove it from this list.
 
-- **Q1 (M1): How satellite identity reaches FarmHub.** The standard OpenAI chat-completions request has no field for the HA `device_id`. Decide which HA conversation integration calls FarmHub and how it passes identity (a header, the `user` field, or a small custom integration). Until resolved, §3.6 fail-closed applies and every request is T0-only.
+- **Q1 (M1): How satellite identity reaches FarmHub.** The standard OpenAI chat-completions request has no field for the HA `device_id`. Decide which HA conversation integration calls FarmHub and how it passes identity (a header, the `user` field, or a small custom integration). Also settle here: the bearer token, server-minted sessions bound to the authenticated identity, and the bind address (§3.6). Until resolved, §3.6 fail-closed applies and every request is T0-only.
 - **Q2 (M6): Action-verb and alias list for the classifier pre-pass.** Proposed source: derived automatically from tool names and descriptions in `config/tools/`, plus a hand-maintained Norwegian and English verb list.
 - **Q3 (M6): Rate limits for T0 and T1.** Only T2 has a default. Propose values.
 - **Q4 (M12): Preview rendering.** How the three PNG previews are rendered inside the sandbox (OpenSCAD's renderer, a headless mesh renderer, or CadQuery SVG export converted to PNG). Must not add a network-capable dependency to the sandbox.
 - **Q5 (M12): Sandbox mechanism.** Plain subprocess with resource limits versus a container, given what is available on hub.
+- **Q6 (M8): Voice confirmation.** The fixed-intent form in §3.3 ("confirm" / "bekreft" handled deterministically by HA, calling the confirm endpoint with the satellite's `device_id`) is provisional. Settle: reading the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions.
+- **Q7 (M12): Printer stack.** Moonraker, OctoPrint or PrusaLink. Their upload APIs can start a print (a `print` flag or an auto-start queue); the upload client must never use either, with a test.
+- **Q8 (M2): Audit sink composition.** Leaning yes: JSONL is the mandatory write-ahead record (a failed JSONL write denies the call), and Postgres is written as well with idempotent catch-up from JSONL after an outage, so a database outage does not deny every tool.

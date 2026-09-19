@@ -18,4 +18,4 @@ Full specification: @SPEC.md — read it at the start of every session.
 
 ## Workflow
 - One branch per milestone, conventional commits.
-- Dry-run is ON by default until M7.
+- Dry-run defaults ON in code permanently; production config turns it off explicitly (from M7).
