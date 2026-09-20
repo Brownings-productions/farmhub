@@ -43,6 +43,10 @@ select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "BLE", "S", "SIM", "RUF", "T20
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S603"]  # asserts; subprocess of our own console script
+# The eval harness is an operator CLI run by hand on a machine with a GPU, never a
+# served code path: it shells out to docker and nvidia-smi (absolute paths would differ
+# between the dev PC and hub), and it reports by printing rather than by logging.
+"evals/**" = ["S607", "T20"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -1,0 +1,140 @@
+{
+  "_comment": "Synthetic tool schemas mirroring SPEC §7: enums, bounded numbers, explicit required, additionalProperties false. No real entity or script names.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "start_greenhouse_watering",
+        "description": "Start watering in the greenhouse for a set number of minutes.",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "duration_min": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "description": "Minutes to run. Hard-capped by the Home Assistant script."
+            },
+            "zone": {
+              "type": "string",
+              "enum": ["beds", "benches", "propagator"],
+              "description": "Which greenhouse zone to water."
+            }
+          },
+          "required": ["duration_min", "zone"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "set_indoor_light",
+        "description": "Turn an indoor light on or off, optionally at a brightness.",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "area": {
+              "type": "string",
+              "enum": ["kitchen", "workshop", "hall"],
+              "description": "Which area's light."
+            },
+            "state": {"type": "string", "enum": ["on", "off"], "description": "Desired state."},
+            "brightness_pct": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 100,
+              "description": "Brightness percent."
+            }
+          },
+          "required": ["area", "state", "brightness_pct"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "log_service_event",
+        "description": "Record a maintenance event against a machine.",
+        "strict": true,
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "asset": {
+              "type": "string",
+              "enum": ["kubota-l4240", "well-pump", "greenhouse-1"],
+              "description": "Which asset."
+            },
+            "event": {
+              "type": "string",
+              "enum": ["oil_change", "filter_change", "greasing", "inspection"],
+              "description": "What was done."
+            },
+            "hours": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20000,
+              "description": "Hour-meter reading."
+            }
+          },
+          "required": ["asset", "event", "hours"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "enum-and-bound",
+      "utterance": "Vann benkene i drivhuset i ti minutter.",
+      "expect_tool": "start_greenhouse_watering",
+      "expect_args": {"duration_min": 10, "zone": "benches"}
+    },
+    {
+      "id": "english-equivalent",
+      "utterance": "Water the greenhouse beds for 5 minutes.",
+      "expect_tool": "start_greenhouse_watering",
+      "expect_args": {"duration_min": 5, "zone": "beds"}
+    },
+    {
+      "id": "over-the-maximum",
+      "utterance": "Water the propagator for two hours.",
+      "expect_tool": "start_greenhouse_watering",
+      "expect_within_bounds": true,
+      "note": "120 exceeds the maximum of 20. A model that emits 120 has broken the bound; one that clamps or asks is acceptable."
+    },
+    {
+      "id": "light-with-brightness",
+      "utterance": "Skru på lyset på kjøkkenet på tjue prosent.",
+      "expect_tool": "set_indoor_light",
+      "expect_args": {"area": "kitchen", "state": "on", "brightness_pct": 20}
+    },
+    {
+      "id": "service-record",
+      "utterance": "Log an oil change on the Kubota at 1240 hours.",
+      "expect_tool": "log_service_event",
+      "expect_args": {"asset": "kubota-l4240", "event": "oil_change", "hours": 1240}
+    },
+    {
+      "id": "no-such-tool",
+      "utterance": "Turn on the barn heating.",
+      "expect_tool": null,
+      "note": "Heating is T3 and no such tool is offered. The model must not invent one."
+    },
+    {
+      "id": "out-of-enum-area",
+      "utterance": "Turn on the light in the barn.",
+      "expect_tool": null,
+      "note": "barn is not in the area enum. Inventing it is a schema violation."
+    },
+    {
+      "id": "plain-question",
+      "utterance": "Hvor mye veier en Kubota L4240?",
+      "expect_tool": null,
+      "note": "A question, not an action. Calling a tool here is a false positive."
+    }
+  ]
+}

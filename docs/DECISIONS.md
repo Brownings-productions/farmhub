@@ -166,6 +166,20 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 
 ## Made while implementing M1
 
+### 2026-09-20: the eval harness emits the profile, so nobody types the numbers
+`evals/` lives outside `tests/` because it needs a real GPU and SPEC §9 forbids a test that does. It is run by hand; CI never touches it.
+
+- **Pins are checked before anything downloads.** A candidate whose `revision` is not a 40-character commit sha is refused and nothing is fetched. `--check` also reports when a pin has fallen behind upstream, so following a move is a decision rather than a surprise. This is the operational half of the §2 revision rule.
+- **The harness writes the `[profiles.*]` block.** `weights_gb` and `kv_cache_gb` come from vLLM's startup log and go straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
+- A test asserts the emitted block is accepted by `ModelProfile`, so the two halves cannot drift apart without the suite noticing.
+- **The kernel actually selected is recorded**, not the one requested, because an NVFP4 checkpoint on sm_120 can fall back to Marlin W4A16 and the run would otherwise look like NVFP4.
+- **Unparsed numbers stay `None`, never 0.0.** A zero looks like a measurement.
+- The matrix expands each candidate over both KV cache dtypes (§2), and Qwen3.6 is run text-only since FarmHub has no multimodal path and the vision tower's memory is memory the KV cache needs.
+- 5 GB is held back for Whisper, BGE-M3 and the reranker, and usable context is reported as KV tokens ÷ 3 concurrent sessions (§1), not as `max_model_len`.
+- Synthetic data only, committed under `evals/data/`. Scoring is deliberately split: schema violations, invented tools and false positives mean different things, and a single accuracy number would hide which.
+
+**In force (M1).**
+
 ### 2026-09-20: `LLMBackend` gains streaming, usage and finish_reason
 `core/protocols.py` marked `LLMBackend` PROVISIONAL, to be revised at the milestone that first uses it. M1 is that milestone. It was too thin for §8.2, which requires streaming and token accounting:
 

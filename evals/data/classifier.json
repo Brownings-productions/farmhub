@@ -1,0 +1,22 @@
+{
+  "_comment": "SPEC §4 classifier. Structured output constrained to {\"kind\": question|action|mixed}. Scored on JSON validity and schema conformance first, correctness second: an invalid response routes to `question` by design, which is safe but useless.",
+  "schema": {
+    "type": "object",
+    "properties": {"kind": {"type": "string", "enum": ["question", "action", "mixed"]}},
+    "required": ["kind"],
+    "additionalProperties": false
+  },
+  "system": "Classify the user's utterance. Reply with JSON only: {\"kind\": \"question\"} for a request for information, {\"kind\": \"action\"} for a request to do something, {\"kind\": \"mixed\"} when it is both.",
+  "cases": [
+    {"id": "no-q", "utterance": "Hvor mye olje tar traktoren?", "expect": "question"},
+    {"id": "no-a", "utterance": "Skru på lyset i verkstedet.", "expect": "action"},
+    {"id": "no-m", "utterance": "Hvor kaldt er det i drivhuset, og kan du vanne benkene?", "expect": "mixed"},
+    {"id": "en-q", "utterance": "When did I last change the hydraulic oil?", "expect": "question"},
+    {"id": "en-a", "utterance": "Water the greenhouse for ten minutes.", "expect": "action"},
+    {"id": "en-m", "utterance": "What is the forecast, and turn the hall light on.", "expect": "mixed"},
+    {"id": "no-q-weather", "utterance": "Blir det frost i natt?", "expect": "question"},
+    {"id": "en-q-parts", "utterance": "What bearing does the front axle take?", "expect": "question"},
+    {"id": "no-a-log", "utterance": "Loggfør oljeskift på traktoren, 1240 timer.", "expect": "action"},
+    {"id": "ambiguous", "utterance": "Drivhuset.", "expect": "question", "note": "A fragment. Uncertain must default to question (SPEC §4)."}
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "_comment": "The M1 candidates (SPEC §2). Revisions resolved 2026-09-20; re-resolve with ./deploy/vllm/vllm.sh resolve <repo> and find out what changed before following a move.",
+  "candidates": [
+    {
+      "name": "qwen36-35b-a3b-nvfp4",
+      "repo_id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+      "revision": "1355db6a052410cfd62085d94b58866fd0f2c3c5",
+      "quantization": "modelopt_fp4",
+      "block_size": 128,
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.82,
+      "extra_args": "--limit-mm-per-prompt {\"image\":0,\"video\":0}",
+      "text_only": true,
+      "notes": "Candidate A. The only one with an official vLLM recipe validated on the RTX 5090. Multimodal, run text-only: FarmHub has no multimodal path and the vision tower's memory is memory the KV cache needs. Watch the kernel line: NVFP4 MoE on sm_120 may fall back to Marlin W4A16."
+    },
+    {
+      "name": "qwen3-30b-a3b-2507-awq",
+      "repo_id": "stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ",
+      "revision": "d1a5d0d183a72483152c37ebdb88d4a015a3c8ea",
+      "quantization": "awq_marlin",
+      "block_size": 16,
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.82,
+      "notes": "Candidate B. No vendor NVFP4 build of Instruct-2507 exists, so 4-bit is the realistic path for the model SPEC originally chose."
+    },
+    {
+      "name": "mistral-small-32-24b-awq",
+      "repo_id": "gghfez/Mistral-Small-3.2-24B-Instruct-hf-AWQ",
+      "revision": "9f337c5a5e23a14e9e665df29a16ca2fc519149b",
+      "quantization": "awq_marlin",
+      "block_size": 16,
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.82,
+      "tool_call_parser": "mistral",
+      "notes": "Fallback (SPEC §2). Community AWQ build; no official one exists. Revision resolved 2026-09-20."
+    }
+  ]
+}

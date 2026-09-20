@@ -18,3 +18,6 @@ config/satellites.toml
 
 # Throwaway Home Assistant state (deploy/dev/ha-compose.yaml)
 /deploy/dev/ha-config/
+
+# Eval run outputs (evals/report.py). The write-up lives in docs/MODEL_EVAL.md.
+/evals/results/

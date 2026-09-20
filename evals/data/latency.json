@@ -1,0 +1,12 @@
+{
+  "_comment": "Time to first token (SPEC §8.2, §1: answers are read aloud, so TTFT is what a person actually experiences). Measured cold and warm: the system prompt and tool schemas are near-constant, so prefix caching is the main latency win (SPEC §2).",
+  "prefix": "You are FarmHub, the assistant for a Norwegian homestead. Answer briefly and concretely; these answers are usually read aloud. Reply in the language the question was asked in. If you do not know something, say so plainly rather than guessing: a wrong part number or torque figure is worse than no answer.",
+  "prompts": [
+    "Hvor kaldt blir det i natt?",
+    "What is the oil capacity of the tractor?",
+    "Når skiftet jeg hydraulikkolje sist?",
+    "How long should the greenhouse be watered?",
+    "Er det frostvarsel denne uka?"
+  ],
+  "concurrent": 3
+}
