@@ -5,8 +5,8 @@
 # Unknown keys, and misspelled FARMHUB_* variables, are rejected at startup.
 # Check a file with:  farmhub --config config/farmhub.toml config check
 #
-# LLM model ids and per-model profiles arrive with M1 (SPEC §2: verify the exact
-# Hugging Face repository ids first, and record them here and in docs/DECISIONS.md).
+# Nested values use a double underscore in the environment:
+#   FARMHUB_API__TOKEN, FARMHUB_LLM__BASE_URL, FARMHUB_DRY_RUN
 
 # SPEC §3.8. The code default is true and never changes. Production sets it to false
 # explicitly (from M7); startup then logs a warning.
@@ -15,3 +15,75 @@ dry_run = true
 [logging]
 level = "INFO"
 file = "logs/farmhub.jsonl"
+
+# --- the HTTP listener the Home Assistant conversation agent calls (SPEC §3.6) --------
+
+[api]
+# Fail-safe default. A non-loopback value is allowed but always logged as a warning,
+# and §3.6 requires it to be firewalled to the ha host.
+#
+# The dev Home Assistant container cannot reach 127.0.0.1 on the WSL host, so
+# config/farmhub.dev.toml overrides this. Production does not.
+bind_host = "127.0.0.1"
+port = 8099
+
+# The service-to-service bearer token. It has no safe default, so the server refuses
+# to start without one; `config check` reports only whether it is set, never the value.
+#
+# Never write a real token into this file. Use either:
+#   FARMHUB_API__TOKEN=...            (environment)
+#   token_file = "/run/secrets/farmhub-token"
+# Setting both token and token_file is an error.
+# token_file = "/run/secrets/farmhub-token"
+
+# --- satellite registry (SPEC §3.6, §8.8) --------------------------------------------
+
+[satellites]
+# Maps an authenticated HA device_id to a home area, a scope and a tier ceiling.
+# When this is absent every request is served T0-only and startup says so: that is
+# the §3.6 fail-closed behaviour, not an oversight.
+# registry = "config/satellites.toml"
+
+# --- the LLM backend (SPEC §2, §8.2) --------------------------------------------------
+
+[llm]
+# vLLM (deploy/vllm/), Ollama (deploy/ollama/) or a test double — all the same protocol.
+base_url = "http://127.0.0.1:8000/v1"
+# Must match vLLM's --served-model-name.
+model = "farmhub-primary"
+# Names a [profiles.*] block below. Optional: a mock backend has no measured profile.
+# profile = "primary"
+request_timeout_s = 60.0
+connect_timeout_s = 5.0
+max_retries = 2
+# vLLM is not always running on the dev PC, so this is what notices it came back.
+health_interval_s = 30.0
+
+# --- measured serving profiles (SPEC §2) ----------------------------------------------
+#
+# A profile is a record of what was measured on the real card, not a wish list. The
+# evals harness emits this block; `measured_by` names the run that produced the
+# numbers, and a profile without one is rejected.
+#
+# Validation at startup:
+#   - revision must be a 40-character commit sha. A tag is not a pin: one NVFP4
+#     upload of Qwen3.6-35B-A3B was silently replaced with weights that loop.
+#   - weights_gb + kv_cache_gb + aux_reserve_gb must fit on the card.
+#   - gpu_memory_utilization must leave aux_reserve_gb free for Whisper, BGE-M3 and
+#     the reranker, which share the 5090 on the default single-GPU profile.
+#   - weights_gb + kv_cache_gb must fit inside vLLM's own share of the card.
+#
+# The numbers below are illustrative only. Replace them with an evals run before use.
+#
+# [profiles.primary]
+# repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+# revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+# quantization = "modelopt_fp4"
+# kv_cache_dtype = "auto"          # "auto" or "fp8"; M1 measures both (SPEC §2)
+# gpu_memory_utilization = 0.82
+# max_model_len = 32768
+# weights_gb = 17.5                # measured
+# kv_cache_gb = 8.0                # measured
+# aux_reserve_gb = 5.0             # 0.0 on the optional dual-GPU profile
+# card_total_gb = 31.8             # RTX 5090, as the driver reports it
+# measured_by = "evals/2026-09-20T12-00-00Z"

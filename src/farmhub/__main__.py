@@ -77,6 +77,11 @@ def load_cli_settings(options: CliOptions) -> Settings:
         raise typer.Exit(EXIT_INVALID_CONFIG) from exc
 
 
+def _format(value: object) -> str:
+    """Booleans as TOML writes them; everything else as itself."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
 @config_app.command("check")
 def config_check(ctx: typer.Context) -> None:
     """Validate configuration and print the effective settings, safety ones first."""
@@ -84,11 +89,19 @@ def config_check(ctx: typer.Context) -> None:
     settings = load_cli_settings(options)
     typer.echo("configuration OK")
     for key, value in settings.safety_summary().items():
-        typer.echo(f"safety.{key} = {str(value).lower()}")
+        typer.echo(f"safety.{key} = {_format(value)}")
     typer.echo(f"logging.level = {settings.logging.level}")
     typer.echo(f"logging.file = {settings.logging.file}")
-    if not settings.dry_run:
-        typer.echo("WARNING: dry_run is off; tools at T1+ may reach Home Assistant.", err=True)
+
+    profile = settings.active_profile()
+    if profile is not None:
+        typer.echo(f"profile.repo_id = {profile.repo_id}")
+        typer.echo(f"profile.revision = {profile.revision}")
+        typer.echo(f"profile.kv_cache_dtype = {profile.kv_cache_dtype}")
+        typer.echo(f"profile.measured_by = {profile.measured_by}")
+
+    for event, detail in settings.safety_warnings():
+        typer.echo(f"WARNING: {event}: {detail}", err=True)
 
 
 def main() -> None:

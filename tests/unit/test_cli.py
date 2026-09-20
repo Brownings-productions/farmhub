@@ -34,7 +34,7 @@ def test_config_check_warns_when_dry_run_is_off() -> None:
     result = runner.invoke(app, ["--no-dry-run", "config", "check"])
     assert result.exit_code == 0
     assert "safety.dry_run = false" in result.stdout
-    assert "WARNING: dry_run is off" in result.stderr
+    assert "WARNING: dry_run_disabled" in result.stderr
 
 
 def test_cli_flag_beats_env_and_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
