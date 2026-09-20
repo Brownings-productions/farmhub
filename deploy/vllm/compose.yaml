@@ -1,0 +1,85 @@
+# vLLM, the inference backend for the llm module (SPEC §2, §8.2).
+#
+# This file is the same on the dev PC and on hub. Only two things differ:
+#   - WHO STARTS IT. On dev you run ./vllm.sh up and ./vllm.sh down by hand, because
+#     the machine is used for other things and a 30 GB model must not hold the GPU all
+#     day. On hub, deploy/systemd/farmhub-vllm.service starts this same file at boot.
+#   - The .env beside it, which carries the model profile.
+#
+# Everything model-specific is interpolated from .env, so switching profiles never edits
+# this file. `./vllm.sh config` prints the fully resolved command before anything runs.
+#
+# restart: "no" is deliberate. A restart policy would bring vLLM back after a Docker
+# Desktop restart and silently reclaim the GPU.
+
+name: farmhub-vllm
+
+services:
+  vllm:
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:?set VLLM_IMAGE_TAG in .env}
+    container_name: farmhub-vllm
+    restart: "no"
+
+    # vLLM's OpenAI server has no authentication of its own. It stays on loopback and
+    # FarmHub is the only thing that talks to it; FarmHub carries the bearer token of
+    # §3.6. Never publish this port to a LAN address.
+    ports:
+      - "${VLLM_BIND_HOST:-127.0.0.1}:${VLLM_PORT:-8000}:8000"
+
+    # The checkpoint cache lives in the Linux filesystem, never under /mnt/*: the
+    # Windows file bridge is far too slow for a 20 GB checkpoint and vLLM mmaps the
+    # safetensors at load.
+    volumes:
+      - ${HF_CACHE_DIR:?set HF_CACHE_DIR in .env}:/root/.cache/huggingface
+
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      # Required by the vLLM recipe for NVFP4 on this card. Harmless otherwise.
+      VLLM_HAS_FLASHINFER_CUBIN: "1"
+
+    # vLLM needs a large shared-memory segment for its worker IPC.
+    ipc: host
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # A string command is interpolated and then split on whitespace, so VLLM_EXTRA_ARGS
+    # can carry several flags. That is where model-specific options go — for a
+    # multimodal checkpoint run text-only (SPEC §2), the flags that exclude the vision
+    # tower belong there, not here.
+    command: >-
+      --host 0.0.0.0
+      --port 8000
+      --model ${VLLM_MODEL:?set VLLM_MODEL in .env}
+      --revision ${VLLM_REVISION:?set VLLM_REVISION in .env (a commit sha; a tag is not a pin)}
+      --served-model-name ${VLLM_SERVED_MODEL_NAME:?set VLLM_SERVED_MODEL_NAME in .env}
+      --quantization ${VLLM_QUANTIZATION:?set VLLM_QUANTIZATION in .env}
+      --kv-cache-dtype ${VLLM_KV_CACHE_DTYPE:?set VLLM_KV_CACHE_DTYPE in .env}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:?set VLLM_MAX_MODEL_LEN in .env}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:?set VLLM_GPU_MEMORY_UTILIZATION in .env}
+      --block-size ${VLLM_BLOCK_SIZE:-16}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-8}
+      --enable-prefix-caching
+      --enable-auto-tool-choice
+      --tool-call-parser ${VLLM_TOOL_CALL_PARSER:?set VLLM_TOOL_CALL_PARSER in .env}
+      ${VLLM_EXTRA_ARGS:-}
+
+    # The image has python3 but not necessarily curl. Loading a 30B checkpoint takes
+    # minutes, so start_period is long and failures before it do not count.
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://localhost:8000/health")
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: ${VLLM_START_PERIOD:-900s}
+
+    stop_grace_period: 30s

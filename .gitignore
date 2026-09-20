@@ -12,3 +12,6 @@ config/satellites.toml
 .pytest_cache/
 /logs/
 /data/
+
+# Ollama model blobs (deploy/ollama/compose.yaml default volume)
+/deploy/ollama/models/

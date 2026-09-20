@@ -164,6 +164,22 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 
 ---
 
+## Made while implementing M1
+
+### 2026-09-20: vLLM is a pinned container started by hand on dev, by systemd on hub
+The inference backend is the official `vllm/vllm-openai` image, defined once in `deploy/vllm/compose.yaml` and used unchanged on both machines. It is a deployment artifact, not a Python dependency: nothing imports vLLM, so SPEC §2's "do not import vLLM outside `modules/llm/`" is satisfied by never importing it at all.
+
+- **Image pinned to `v0.29.0`**, the first release at or above the 0.28.0 that the RTX 5090 NVFP4 recipe requires. Not `:latest`: the NVFP4 kernel path on sm_120 depends on the vLLM version, so an unpinned image would change which kernel is selected without anything in the repo changing.
+- **Start and stop are manual on the dev PC.** Docker Desktop on WSL2 has no systemd socket activation and vLLM has no idle shutdown, so an automatic scheme would mean a bespoke sidecar. `deploy/vllm/vllm.sh` wraps `up | down | restart | wait | status | logs | config | resolve`, and `restart: "no"` in the compose file keeps the container from returning by itself after a Docker Desktop restart. On hub `deploy/systemd/farmhub-vllm.service` runs the same file always-on. An idle-stop sidecar polling `/metrics` is noted in the RUNBOOK as deferred, not built.
+- **The model profile lives entirely in `deploy/vllm/.env`**, interpolated into the compose command, so changing profile never edits YAML and `./vllm.sh config` prints the exact command before anything runs. Required variables use compose's `:?` guard, so a missing revision or model fails loudly rather than starting something unintended. `env.example` is tracked under that name because `.gitignore` excludes `.env.*`.
+- **`./vllm.sh resolve <repo>`** turns a repo name into the commit sha that SPEC §2 requires, so pinning is a command rather than a manual hunt. The five M1 candidates were resolved on 2026-09-20 and their shas recorded in `env.example`; all five repository IDs in SPEC §2 are confirmed to exist.
+- **Neither backend is authenticated**, so both bind to loopback on every host. FarmHub is the only client and carries the §3.6 bearer token.
+- **`deploy/ollama/compose.yaml`** exists so the §2 promise that switching to Ollama is a config change is actually testable. It is a fallback, not a peer.
+
+**In force (M1).**
+
+---
+
 ## Decided after M0 (2026-09-20)
 
 ### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists

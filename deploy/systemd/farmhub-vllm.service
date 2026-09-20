@@ -1,0 +1,36 @@
+# vLLM on hub, from the same compose file the dev PC uses by hand (deploy/vllm/).
+#
+# The only difference between the two machines is who starts it: on dev you run
+# ./vllm.sh up and ./vllm.sh down, because that machine is used for other things; on
+# hub it is always on, so it starts at boot.
+#
+# Install:
+#   sudo cp deploy/systemd/farmhub-vllm.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now farmhub-vllm
+#
+# Adjust WorkingDirectory and User to wherever the repo is checked out on hub.
+
+[Unit]
+Description=FarmHub vLLM inference backend
+Documentation=https://github.com/Brownings-productions/farmhub
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=farmhub
+WorkingDirectory=/opt/farmhub
+
+# compose.yaml sets restart: "no" so nothing brings the container back behind your
+# back; systemd owns the lifecycle on this host instead.
+ExecStart=/usr/bin/docker compose --env-file deploy/vllm/.env -f deploy/vllm/compose.yaml up -d
+ExecStop=/usr/bin/docker compose --env-file deploy/vllm/.env -f deploy/vllm/compose.yaml down
+
+# Loading a 30B checkpoint from a cold page cache takes minutes.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

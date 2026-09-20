@@ -1,0 +1,44 @@
+# Ollama: the fallback inference backend (SPEC §2).
+#
+# "Switching to Ollama must be a config change, never a code change." This file exists
+# so that switch is possible without touching Python: bring this up instead of
+# deploy/vllm/, point llm.base_url at it, and FarmHub cannot tell the difference — the
+# llm module only ever speaks the OpenAI-compatible protocol.
+#
+# It is a fallback, not a peer. vLLM is the primary backend and the one the M1 model
+# evaluation measures. Ollama is here for when vLLM will not start on a given card,
+# and for developing against a small model without a 30 GB download.
+#
+# Ollama serves an OpenAI-compatible API at /v1 on port 11434, so FarmHub's base_url
+# becomes http://127.0.0.1:11434/v1.
+#
+# Like vLLM, it has no authentication. Keep it on loopback.
+
+name: farmhub-ollama
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-latest}
+    container_name: farmhub-ollama
+    restart: "no"
+
+    ports:
+      - "${OLLAMA_BIND_HOST:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+
+    volumes:
+      - ${OLLAMA_MODELS_DIR:-./models}:/root/.ollama
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
