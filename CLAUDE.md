@@ -3,7 +3,7 @@
 Full specification: @SPEC.md — read it at the start of every session.
 
 ## Rules of engagement
-- Build milestones in §11 order. Current milestone: M0.
+- Build milestones in §11 order. Current milestone: M1.
 - A milestone is done only when its tests pass. Do not start the next one until I say so.
 - §3 is non-negotiable. Refuse conflicting requests and quote the rule number.
 - If something is ambiguous, stop and ask. One good question beats 400 wrong lines.
