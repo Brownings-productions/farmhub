@@ -166,6 +166,45 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 
 ## Made while implementing M1
 
+### 2026-09-20: `LLMBackend` gains streaming, usage and finish_reason
+`core/protocols.py` marked `LLMBackend` PROVISIONAL, to be revised at the milestone that first uses it. M1 is that milestone. It was too thin for §8.2, which requires streaming and token accounting:
+
+- `LLMResponse` gains `finish_reason`, `usage` (a new `TokenUsage`) and `model`. `finish_reason` is worth surfacing because a silent `length` truncation otherwise looks like a short answer.
+- `stream_chat` is added, yielding content deltas. It takes no `tools`: a streamed turn is for latency-sensitive prose, and tool calls are resolved by `chat`, where the whole call is seen at once.
+- `structured` gains `schema_name` and is documented to raise `LLMError` rather than return something unusable, so the §4 classifier applies its safe default instead of guessing.
+- `ChatMessage.role` is narrowed to `system | user | assistant`. The tool-result fields (`tool_call_id` and the rest) arrive at M6, when tool results first have to be fed back.
+- New `LLMError`, distinct from `DependencyUnavailable`: the latter means the backend is down and the module should start degraded, the former that one call failed.
+
+**In force (M1).**
+
+### 2026-09-20: `AppContext` carries the LLM backend, not the llm module
+`build_app` constructs `OpenAICompatBackend` and puts it in the context; `LlmModule` gets the same object and owns its lifecycle. Constructing the client opens no connection, so building an app stays free of I/O and works with every backend down. The orchestrator can then issue completions without importing `modules.llm`, which keeps SPEC §5's "modules never import each other" intact as the orchestrator lands at M6.
+
+`ENABLED_MODULES` became `default_modules(ctx, backend)` for the same reason: the composition root already holds the concrete object it built, so passing it in beats narrowing the protocol back down. `build_app(settings, [])` still gives an empty app for tests. **In force (M1).**
+
+### 2026-09-20: `respx` cannot test the LLM client; a mock transport does
+SPEC §12 lists `respx` for mocking HTTP in tests, and the M1 plan assumed it. It does not work here: `openai` 3.x uses `httpx2`, while `respx` patches `httpx`, so it never sees the SDK's requests.
+
+Instead `OpenAICompatBackend` takes an `http_client` seam, and `tests/unit/test_llm.py` passes a mock transport from the SDK's own HTTP library. This runs in process with no network and no GPU (§9), and exercises the real client, real serialization and real error mapping rather than a stub.
+
+That parameter is typed loosely (`Any`) on purpose, so the transitive HTTP library is named only in tests and never in `src/`. `openai.Timeout` and `openai.omit` are used in the client for the same reason — the SDK re-exports what is needed, so nothing unapproved appears in the runtime imports. `respx` stays in the dev dependencies for the `web` module at M11, which uses `httpx` directly.
+
+**Worth raising:** if the loose typing or the test-only import is not acceptable, the alternative is writing the client on plain `httpx` instead of the SDK. That is more code but removes the mismatch entirely. **In force (M1).**
+
+### 2026-09-20: the vLLM and SDK import boundaries are enforced twice
+SPEC §2 says not to import vLLM outside `modules/llm/`. In practice nothing imports it at all, because it is a container rather than a library, and that is what keeps "switching to Ollama is a config change" true.
+
+- `lint-imports` gains a `no module imports vllm` contract (which needed `include_external_packages = true`).
+- `tests/safety/test_llm_boundary.py` asserts the same by parsing every source file, plus that only `modules/llm` imports the `openai` SDK. Anywhere else would mean a second way to talk to the model, outside the protocol the gateway and orchestrator are built around.
+
+Both were verified to fail when a violation is introduced. The module-independence contract still waits for a second module. **In force (M1).**
+
+### 2026-09-20: probing the model list, not just the port
+`probe()` calls `/v1/models` and fails with `DependencyUnavailable` if the configured model is not among those served. A backend that answers but serves something else would otherwise silently invalidate the M1 evaluation, and the whole point of pinning a revision is knowing which weights answered. The connect timeout is separate from and much shorter than the request timeout, so a stopped vLLM degrades the module in seconds rather than after a minute. **In force (M1).**
+
+### 2026-09-20: unparseable tool arguments become an empty mapping
+A tool call whose `arguments` are not a JSON object yields `ToolCall(name, {})` rather than raising. Model output is untrusted text, and if malformed arguments raised inside the client, the turn would die before any audit row named the tool that was attempted. Instead the gateway sees a named call, denies it and audits it (§3.7). **In force (M1).**
+
 ### 2026-09-20: vLLM is a pinned container started by hand on dev, by systemd on hub
 The inference backend is the official `vllm/vllm-openai` image, defined once in `deploy/vllm/compose.yaml` and used unchanged on both machines. It is a deployment artifact, not a Python dependency: nothing imports vLLM, so SPEC §2's "do not import vLLM outside `modules/llm/`" is satisfied by never importing it at all.
 

@@ -30,5 +30,14 @@ class SafetyViolation(FarmHubError):
     """Code attempted something the SPEC §3 rules forbid."""
 
 
+class LLMError(FarmHubError):
+    """The LLM backend failed, or returned something that could not be used.
+
+    Distinct from ``DependencyUnavailable``: that means the backend is down and the
+    module should start degraded, while this means one call failed. The §4 classifier
+    turns it into the safe default rather than guessing.
+    """
+
+
 class AuditWriteError(FarmHubError):
     """An audit row could not be written. The gateway treats this as deny (§3.7)."""

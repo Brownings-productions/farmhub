@@ -16,9 +16,9 @@ from farmhub.core.gateway import Gateway
 from farmhub.core.logging import get_logger
 from farmhub.core.protocols import Module
 from farmhub.core.registry import ModuleRegistry
+from farmhub.modules.llm import LlmModule, OpenAICompatBackend
 
-# Modules are added here as their milestones land (llm at M1, records at M2, ...).
-ENABLED_MODULES: tuple[Callable[[], Module], ...] = ()
+ModuleFactory = Callable[[], Module]
 
 
 @dataclass(frozen=True)
@@ -30,21 +30,43 @@ class App:
     gateway: Gateway
 
 
+def default_modules(ctx: AppContext, backend: OpenAICompatBackend) -> tuple[ModuleFactory, ...]:
+    """The modules FarmHub runs, in start order.
+
+    This is the explicit list of SPEC §6 — no entry-point scanning, and ``core`` never
+    imports a module. New milestones add a line here, in review (records at M2, ingest
+    at M3, ...).
+
+    ``backend`` is passed in rather than taken from ``ctx.llm`` because the composition
+    root already holds the concrete object it built; reaching back through the protocol
+    would only mean narrowing it again.
+    """
+    return (lambda: LlmModule(backend),)
+
+
 def build_app(
     settings: Settings,
-    module_factories: Sequence[Callable[[], Module]] = ENABLED_MODULES,
+    module_factories: Sequence[ModuleFactory] | None = None,
 ) -> App:
     """Construct the app from validated settings.
+
+    Nothing here does I/O: the LLM client opens no connection until the llm module
+    probes it, so building an app is safe even with every backend down.
 
     Until a real audit sink exists the context carries ``UnconfiguredAuditSink``, which
     refuses every write, so the gateway denies every call rather than running unaudited.
     """
     log = get_logger("farmhub")
+    backend = OpenAICompatBackend(settings.llm, log)
     ctx = AppContext(
         settings=settings,
         log=log,
         events=EventBus(log),
         audit=UnconfiguredAuditSink(),
+        llm=backend,
     )
-    registry = ModuleRegistry([factory() for factory in module_factories])
+    factories = (
+        default_modules(ctx, backend) if module_factories is None else tuple(module_factories)
+    )
+    registry = ModuleRegistry([factory() for factory in factories])
     return App(ctx=ctx, registry=registry, gateway=Gateway(ctx, registry))

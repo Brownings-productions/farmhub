@@ -1,0 +1,311 @@
+"""The llm module and its OpenAI-compatible client (SPEC §8.2).
+
+Everything here runs in process against a mock HTTP transport: no network, no backend,
+no GPU (SPEC §9). The transport belongs to the HTTP library the openai SDK happens to
+use, which is why it is reached for here and never in ``src/``.
+"""
+
+import json
+from collections.abc import Callable
+from typing import Any
+
+import httpx2
+import pytest
+import structlog
+from support import make_app_context
+
+from farmhub.core.config import LlmSettings, Settings
+from farmhub.core.errors import DependencyUnavailable, LLMError
+from farmhub.core.protocols import ChatMessage, HealthState, Tier, ToolSpec
+from farmhub.modules.llm import LlmModule, OpenAICompatBackend
+from farmhub.modules.llm.client import tool_schema
+
+MODEL = "farmhub-primary"
+
+
+def make_backend(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+    *,
+    settings: LlmSettings | None = None,
+) -> OpenAICompatBackend:
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    return OpenAICompatBackend(
+        settings if settings is not None else LlmSettings(model=MODEL, max_retries=0),
+        structlog.get_logger("test"),
+        http_client=client,
+    )
+
+
+def completion_body(
+    content: str | None = "hei",
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+    finish_reason: str = "stop",
+) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": MODEL,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14},
+    }
+
+
+def models_body(*ids: str) -> dict[str, Any]:
+    return {
+        "object": "list",
+        "data": [{"id": i, "object": "model", "created": 0, "owned_by": "x"} for i in ids],
+    }
+
+
+# --- probe: the degraded-start signal -------------------------------------------------
+
+
+async def test_probe_returns_the_served_model() -> None:
+    backend = make_backend(lambda r: httpx2.Response(200, json=models_body(MODEL)))
+    assert await backend.probe() == MODEL
+
+
+async def test_an_unreachable_backend_is_a_dependency_failure_not_a_crash() -> None:
+    """vLLM is stopped by hand on the dev PC, so this is a normal condition."""
+
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused", request=request)
+
+    backend = make_backend(refuse)
+    with pytest.raises(DependencyUnavailable, match="unreachable"):
+        await backend.probe()
+
+
+async def test_a_backend_serving_a_different_model_is_reported_not_used() -> None:
+    """Silently answering from the wrong model would invalidate the whole evaluation."""
+    backend = make_backend(lambda r: httpx2.Response(200, json=models_body("some-other-model")))
+    with pytest.raises(DependencyUnavailable, match="some-other-model"):
+        await backend.probe()
+
+
+async def test_a_5xx_from_the_backend_is_a_dependency_failure() -> None:
+    backend = make_backend(lambda r: httpx2.Response(503, json={"error": "loading"}))
+    with pytest.raises(DependencyUnavailable, match="503"):
+        await backend.probe()
+
+
+# --- chat -----------------------------------------------------------------------------
+
+
+async def test_chat_returns_content_and_token_accounting() -> None:
+    backend = make_backend(lambda r: httpx2.Response(200, json=completion_body("god morgen")))
+    response = await backend.chat([ChatMessage("user", "hei")])
+    assert response.content == "god morgen"
+    assert response.finish_reason == "stop"
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 11
+    assert response.usage.total_tokens == 14
+
+
+async def test_chat_sends_the_configured_model_and_the_messages_given() -> None:
+    seen: dict[str, Any] = {}
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.update(json.loads(request.content))
+        return httpx2.Response(200, json=completion_body())
+
+    backend = make_backend(capture)
+    await backend.chat([ChatMessage("system", "rules"), ChatMessage("user", "hei")])
+    assert seen["model"] == MODEL
+    assert seen["messages"] == [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "hei"},
+    ]
+
+
+async def test_no_tools_key_is_sent_when_there_are_no_tools() -> None:
+    """An empty list is not the same as absent; some backends reject the empty list."""
+    seen: dict[str, Any] = {}
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.update(json.loads(request.content))
+        return httpx2.Response(200, json=completion_body())
+
+    backend = make_backend(capture)
+    await backend.chat([ChatMessage("user", "hei")])
+    assert "tools" not in seen
+
+
+async def test_tool_calls_are_parsed() -> None:
+    calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"place": "barn"}'},
+        }
+    ]
+    backend = make_backend(
+        lambda r: httpx2.Response(
+            200, json=completion_body(None, tool_calls=calls, finish_reason="tool_calls")
+        )
+    )
+    response = await backend.chat([ChatMessage("user", "weather?")])
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].name == "get_weather"
+    assert response.tool_calls[0].arguments == {"place": "barn"}
+
+
+@pytest.mark.parametrize("arguments", ["not json at all", "[1, 2]", ""])
+async def test_unparseable_tool_arguments_become_empty_not_an_exception(arguments: str) -> None:
+    """The gateway must still get a named call to deny and audit (SPEC §3.7).
+
+    Model output is untrusted text. If malformed arguments raised here, the turn would
+    die before any audit row named the tool that was attempted.
+    """
+    calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "start_watering", "arguments": arguments},
+        }
+    ]
+    backend = make_backend(
+        lambda r: httpx2.Response(200, json=completion_body(None, tool_calls=calls))
+    )
+    response = await backend.chat([ChatMessage("user", "water")])
+    assert response.tool_calls[0].name == "start_watering"
+    assert response.tool_calls[0].arguments == {}
+
+
+# --- structured output, for the §4 classifier -----------------------------------------
+
+
+async def test_structured_parses_the_json_object() -> None:
+    body = completion_body(json.dumps({"kind": "action"}))
+    backend = make_backend(lambda r: httpx2.Response(200, json=body))
+    result = await backend.structured(
+        [ChatMessage("user", "turn on the light")], {"type": "object"}
+    )
+    assert result == {"kind": "action"}
+
+
+async def test_structured_sends_no_tools() -> None:
+    """SPEC §4: the classifier is issued with tools=[] and can never act."""
+    seen: dict[str, Any] = {}
+
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.update(json.loads(request.content))
+        return httpx2.Response(200, json=completion_body('{"kind": "question"}'))
+
+    backend = make_backend(capture)
+    await backend.structured([ChatMessage("user", "hei")], {"type": "object"})
+    assert "tools" not in seen
+    assert seen["response_format"]["type"] == "json_schema"
+    assert seen["response_format"]["json_schema"]["strict"] is True
+
+
+@pytest.mark.parametrize("content", ["not json", "[1,2,3]", '"a string"'])
+async def test_structured_output_that_is_not_an_object_raises_llm_error(content: str) -> None:
+    """The caller applies the §4 safe default; it must not receive a plausible lie."""
+    backend = make_backend(lambda r: httpx2.Response(200, json=completion_body(content)))
+    with pytest.raises(LLMError):
+        await backend.structured([ChatMessage("user", "hei")], {"type": "object"})
+
+
+# --- streaming ------------------------------------------------------------------------
+
+
+async def test_stream_chat_yields_content_deltas() -> None:
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "god "}}]},
+        {"choices": [{"index": 0, "delta": {"content": "morgen"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    payload = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    backend = make_backend(
+        lambda r: httpx2.Response(200, text=payload, headers={"content-type": "text/event-stream"})
+    )
+    deltas = [d async for d in backend.stream_chat([ChatMessage("user", "hei")])]
+    assert "".join(deltas) == "god morgen"
+
+
+# --- tool schema rendering ------------------------------------------------------------
+
+
+def test_tool_schema_is_strict_and_carries_the_spec_schema() -> None:
+    """Strict decoding is what makes the enums and bounds of §7 worth declaring."""
+
+    async def handler(call: Any, ctx: Any) -> Any:  # pragma: no cover - never invoked
+        raise AssertionError
+
+    parameters = {
+        "type": "object",
+        "properties": {"duration_min": {"type": "integer", "minimum": 1, "maximum": 20}},
+        "required": ["duration_min"],
+        "additionalProperties": False,
+    }
+    spec = ToolSpec(
+        name="start_greenhouse_watering",
+        description="Start watering.",
+        parameters=parameters,
+        tier=Tier.CONFIRMED,
+        handler=handler,
+        allowed_scopes=frozenset({"greenhouse"}),
+    )
+    rendered = tool_schema(spec)
+    assert rendered["type"] == "function"
+    assert rendered["function"]["name"] == "start_greenhouse_watering"
+    assert rendered["function"]["strict"] is True
+    assert rendered["function"]["parameters"]["additionalProperties"] is False
+
+
+# --- the module -----------------------------------------------------------------------
+
+
+async def test_module_starts_when_the_backend_is_serving() -> None:
+    backend = make_backend(lambda r: httpx2.Response(200, json=models_body(MODEL)))
+    module = LlmModule(backend)
+    await module.startup(make_app_context(settings=Settings(llm=LlmSettings(model=MODEL))))
+    report = await module.health()
+    assert report.status is HealthState.HEALTHY
+    await module.shutdown()
+
+
+async def test_module_exposes_no_tools() -> None:
+    """SPEC §8.2. The LLM is how tools are chosen, never a tool itself."""
+    backend = make_backend(lambda r: httpx2.Response(200, json=models_body(MODEL)))
+    assert LlmModule(backend).tools() == []
+
+
+async def test_module_start_raises_dependency_unavailable_so_the_registry_degrades() -> None:
+    """This is what lets vLLM be stopped by hand without taking FarmHub down."""
+
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("refused", request=request)
+
+    module = LlmModule(make_backend(refuse))
+    with pytest.raises(DependencyUnavailable):
+        await module.startup(make_app_context())
+
+
+async def test_module_health_reports_a_backend_that_went_away() -> None:
+    """Reported, not assumed still there: this is what the health poll acts on."""
+    serving = True
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if serving:
+            return httpx2.Response(200, json=models_body(MODEL))
+        raise httpx2.ConnectError("refused", request=request)
+
+    module = LlmModule(make_backend(handler))
+    await module.startup(make_app_context())
+    serving = False
+    report = await module.health()
+    assert report.status is HealthState.UNHEALTHY
+
+
+async def test_module_shutdown_is_idempotent() -> None:
+    """The registry calls shutdown after a failed start and before every retry."""
+    module = LlmModule(make_backend(lambda r: httpx2.Response(200, json=models_body(MODEL))))
+    await module.shutdown()
+    await module.shutdown()

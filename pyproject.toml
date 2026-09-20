@@ -57,9 +57,12 @@ filterwarnings = ["error"]
 
 [tool.importlinter]
 root_package = "farmhub"
+# Required so the "no module imports vllm" contract below can name a package that is
+# not part of farmhub.
+include_external_packages = true
 
-# Phased per docs/DECISIONS.md: core isolation now. The module-independence contract
-# is added once two modules exist, the vLLM-import ban once modules/llm exists.
+# Phased per docs/DECISIONS.md: core isolation from M0; the vLLM-import ban now that
+# modules/llm exists. The module-independence contract is added once two modules do.
 [[tool.importlinter.contracts]]
 name = "core does not import the rest of farmhub"
 type = "forbidden"
@@ -71,3 +74,14 @@ forbidden_modules = [
     "farmhub.modules",
     "farmhub.storage",
 ]
+
+# SPEC §2: "Do not import vLLM anywhere outside modules/llm/." In practice vLLM is a
+# container, not a library, so nothing imports it at all — tests/safety asserts that
+# directly. This contract is the structural half: even modules/llm must reach the
+# backend over the OpenAI-compatible protocol, so that switching to Ollama stays a
+# config change.
+[[tool.importlinter.contracts]]
+name = "no module imports vllm"
+type = "forbidden"
+source_modules = ["farmhub"]
+forbidden_modules = ["vllm"]
