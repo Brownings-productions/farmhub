@@ -24,7 +24,7 @@ lands at the milestone shown. **todo** = not yet possible.
 | 10 | A push confirmation from a device not in the area's `confirmers` is rejected | M8 | todo |
 | 11 | A PendingAction cannot be confirmed twice | M8 | todo |
 | 12 | Scope filtering: the workshop scope cannot reach greenhouse tools | M6 | todo |
-| 13 | Every executed tool call produced exactly one audit row | M0, extended per milestone | partial: gateway writes intent + one outcome row (`test_gateway.py`) |
+| 13 | Every executed tool call produced exactly one audit row | M0, extended at M2 (JSONL, Postgres) | partial: gateway writes intent + one outcome row (`test_gateway.py`) |
 | 14 | Dry-run mode issues zero outbound HA service calls | M6 (HA client: M5) | todo |
 | 15 | A tool config referencing a missing HA script fails startup | M5/M6 | todo |
 | 16 | A tool config missing `required`, or with unbounded parameters, fails startup | M5/M6 | todo |
@@ -43,6 +43,15 @@ lands at the milestone shown. **todo** = not yet possible.
 | `ToolSpec.parameters` must be a strict object schema | M0 | done: `test_baseline.py` |
 | Skips and xfails under `tests/safety` fail | M0 | done: `tests/unit/test_safety_conftest.py` |
 | Tools of a degraded module are withheld from every tool list | M0 | done: `tests/unit/test_registry.py` (not in `tests/safety`) |
+| JSONL audit sink: the intent row is fsynced to the file before the handler runs, and every line is valid JSON | M2 | todo |
+| JSONL write failure (unwritable path, simulated full disk) denies the call and nothing runs | M2 | todo |
+| JSONL sink appends across restarts without truncating, and concurrent writes never interleave | M2 | todo |
+| Startup fails fast when the JSONL path cannot be opened for append | M2 | todo |
+| Postgres down: tools still run and both rows land in the JSONL file | M2 | todo |
+| Catch-up from JSONL to Postgres is idempotent on `(call_id, phase)`, skips a torn last line, and resumes from the checkpoint | M2 | todo |
+| The Postgres audit role cannot UPDATE or DELETE, and the trigger rejects both | M2 | todo |
+| A tool file with an error fails startup before any HA connection is attempted | M5 | todo |
+| A call to a tool of a not-yet-connected or degraded module, including a T3 declaration while HA is down, is denied and audited with the correct tier, not as an unknown tool | M5 | todo |
 | Client-supplied `tools` and system prompts are ignored | M1 | todo |
 | Sessions are minted server-side and bound to the authenticated identity; the bearer token is required on the chat and confirm endpoints | M1 | todo |
 | Action turns receive only the current utterance: replayed history is dropped, including the follow-up turn of a `mixed` flow | M6 | todo |
