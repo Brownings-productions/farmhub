@@ -5,8 +5,9 @@ One short entry per architectural choice, dated. Status tags:
 - **In force (M0)**: implemented in M0.
 - **Recorded**: decided now, implemented at the named milestone.
 - **Accepted (SPEC v1.2, 2026-09-20)**: differed from SPEC v1.1 and is now part of the accepted SPEC v1.2. The entry says which parts are implemented.
+- **Accepted (SPEC v1.3)**: part of the accepted SPEC v1.3 (2026-09-20), which amends §2 and §11 only.
 
-SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below.
+SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule.
 
 ---
 
@@ -48,7 +49,7 @@ An action turn receives the current utterance plus a fixed server-side system pr
 Refines §3.7 and §9. **In force (M0)** for the types and the gateway's fail-closed behaviour.
 
 ### 2026-09-20: Audit sinks when Postgres is down: the JSONL sink is planned for M2 (Q8)
-Direction accepted 2026-09-20 (it was "leaning yes, decide at M2"): JSONL is the mandatory write-ahead record, and a failed JSONL write denies the call. Postgres is written as well, with idempotent catch-up from JSONL, so a database outage does not deny every tool. This moves the JSONL sink from M5/M6 to M2, alongside the Postgres sink. SPEC §11's M2 row says the composition is "decided"; its wording should also say the JSONL sink is implemented at the next SPEC touch.
+Direction accepted 2026-09-20 (it was "leaning yes, decide at M2"): JSONL is the mandatory write-ahead record, and a failed JSONL write denies the call. Postgres is written as well, with idempotent catch-up from JSONL, so a database outage does not deny every tool. This moves the JSONL sink from M5/M6 to M2, alongside the Postgres sink. SPEC §11's M2 row said the composition is merely "decided"; it now says the JSONL sink is implemented (SPEC v1.3, row 8).
 
 Plan for M2:
 - **`JsonlAuditSink`** in `core/audit.py` (mypy-strict). One JSON object per line (UUIDs and datetimes as strings, enums by value, tier as an int). File opened append-only and created 0600. Each entry is a single `write`, then flush and fsync before `write()` returns, so the intent row is on disk before any handler runs. Blocking IO runs off the event loop and writes are serialized by a lock. Any `OSError` (disk full, permission, missing directory) becomes `AuditWriteError`, so the gateway denies.
@@ -126,6 +127,8 @@ Each §9 test lands in the milestone that creates its subject. Checklist kept in
 ### 2026-09-19: Per-model LLM profiles
 The config schema carries per-model profiles (model id, quantization, `gpu_memory_utilization`, `max_model_len`), including a single-GPU profile with a smaller model. The §2 numbers were wrong (about 30 GB of FP8 weights exceed 0.90 x 32 GB). The model settles at M1. First candidate is the same model in NVFP4, evaluated on tool-call fidelity and part numbers. **Recorded (M1).**
 
+Superseded in part by the 2026-09-20 hardware entry below: the single-GPU profile is now the default rather than a degradation and keeps the primary model, the profile gains `revision`, `kv_cache_dtype`, `weights_gb`, `kv_cache_gb`, `aux_reserve_gb` and `measured_by`, and "the same model in NVFP4" turned out not to exist as a vendor build — see that entry for the candidate list that replaces it.
+
 ---
 
 ## Made while implementing M0
@@ -162,6 +165,20 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 ---
 
 ## Decided after M0 (2026-09-20)
+
+### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists
+The hardware plan changed. hub is no longer the repurposed desktop: it is a new build that does not exist yet. There is one RTX 5090, currently in the dev PC (ClevatessPrime, Windows + WSL2); it moves to hub when hub is built, and the dev PC then takes an RTX 5080 16 GB. hub is specified with a free PCIe x16 slot and PSU headroom for an optional 8–12 GB auxiliary card, bought or not after M1 measures what the single-GPU profile leaves. The RTX 3070 is gone from the plan.
+
+Consequences, all in §2 and §11 only — **no §3 rule is touched**:
+
+- **The single-GPU profile is the default.** vLLM, faster-whisper, BGE-M3 and the reranker share the 5090. "The 5090 serves the LLM and nothing else" is kept, but scoped to the optional dual-GPU profile. The old rule was the only thing preventing an auxiliary model from starving the LLM, so it is replaced rather than deleted: every profile declares `aux_reserve_gb`, config validation rejects a profile whose `weights_gb + kv_cache_gb + aux_reserve_gb` exceeds the card or whose `gpu_memory_utilization` does not leave the reservation free, and vLLM starts before the auxiliary models so its fraction is computed against a known-free card.
+- **Budget numbers are measured, not estimated.** `weights_gb` and `kv_cache_gb` come from an M1 evaluation run on the real card and carry the run id that produced them. A profile with hand-written numbers is rejected. Note the limit honestly: this is arithmetic over declared numbers, not a live VRAM probe (NVML is not on the §12 list and would be hub-only). The real OOM guard stays vLLM's preflight plus the measured numbers.
+- **Every profile pins a `revision` (commit sha).** A tag is not a pin: one NVFP4 upload of Qwen3.6-35B-A3B was silently replaced on 2026-07-10 with looping weights. The eval harness refuses an unpinned profile and verifies the resolved sha.
+- **`kv_cache_dtype` is a declared, evaluated field.** FP8 KV cache has reported quality collapse on this hybrid architecture, so M1 measures each candidate at the default dtype and at FP8, on quality as well as memory.
+- **Model candidates.** Repository IDs verified 2026-09-20. There is no vendor NVFP4 build of `Qwen3-30B-A3B-Instruct-2507` — `nvidia/Qwen3-30B-A3B-NVFP4` and `RedHatAI/Qwen3-30B-A3B-NVFP4` quantize the older *Base* model and the NVIDIA one targets TensorRT-LLM. On sm_120 (consumer Blackwell) vLLM's NVFP4 MoE dispatch has open bugs and ModelOpt checkpoints fall back to Marlin W4A16 with a "no native FP4 support" warning, so a run can look like NVFP4 without being it and the eval records the kernel actually selected. `Qwen/Qwen3.6-35B-A3B` (`nvidia/Qwen3.6-35B-A3B-NVFP4`) is therefore added as candidate A: same 35B/3B-active MoE shape, and the only candidate with an official vLLM recipe validated on the RTX 5090. It is multimodal, so FarmHub runs it text-only — §1 has no multimodal path and the vision tower's memory is memory the KV cache needs.
+- After the swap the dev PC uses vLLM on hub over the LAN, with a small-model 5080 profile as the offline fallback. Config, not code.
+
+Accepted as SPEC v1.3 (2026-09-20). The model itself is chosen at M1 from `docs/MODEL_EVAL.md`. **Accepted (SPEC v1.3)**; the profile fields and their validation are **Recorded (M1)**.
 
 ### 2026-09-20: Tool declarations load before dependencies connect (registry contract change at M5)
 The `ha` module loads and validates its tool TOML files (config: fail fast on any error) before it connects to HA (dependency: degradable). Its tools, including T3 declarations, are therefore registered even when HA is down, and the gateway audits a call to any of them with the correct tier and the reason "module not running", never as an unknown tool. This resolves the M0 known limitation.
