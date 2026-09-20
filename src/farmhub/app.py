@@ -16,7 +16,7 @@ from farmhub.core.gateway import Gateway
 from farmhub.core.logging import get_logger
 from farmhub.core.protocols import Module
 from farmhub.core.registry import ModuleRegistry
-from farmhub.modules.llm import LlmModule, OpenAICompatBackend
+from farmhub.modules.llm import LlmModule, LLMService, OpenAICompatBackend
 
 ModuleFactory = Callable[[], Module]
 
@@ -28,9 +28,16 @@ class App:
     ctx: AppContext
     registry: ModuleRegistry
     gateway: Gateway
+    # The shared LLM connection. Held here because this is what constructed it, and
+    # closing it is this layer's job, not any module's.
+    backend: LLMService
+
+    async def aclose(self) -> None:
+        """Release what the composition root owns. Call after the registry has stopped."""
+        await self.backend.aclose()
 
 
-def default_modules(ctx: AppContext, backend: OpenAICompatBackend) -> tuple[ModuleFactory, ...]:
+def default_modules(ctx: AppContext, backend: LLMService) -> tuple[ModuleFactory, ...]:
     """The modules FarmHub runs, in start order.
 
     This is the explicit list of SPEC §6 — no entry-point scanning, and ``core`` never
@@ -47,6 +54,8 @@ def default_modules(ctx: AppContext, backend: OpenAICompatBackend) -> tuple[Modu
 def build_app(
     settings: Settings,
     module_factories: Sequence[ModuleFactory] | None = None,
+    *,
+    backend: LLMService | None = None,
 ) -> App:
     """Construct the app from validated settings.
 
@@ -57,7 +66,10 @@ def build_app(
     refuses every write, so the gateway denies every call rather than running unaudited.
     """
     log = get_logger("farmhub")
-    backend = OpenAICompatBackend(settings.llm, log)
+    # ``backend`` is the composition root's one injection point: production builds the
+    # real client, tests hand in a double, and nothing below has to know which.
+    if backend is None:
+        backend = OpenAICompatBackend(settings.llm, log)
     ctx = AppContext(
         settings=settings,
         log=log,
@@ -69,4 +81,4 @@ def build_app(
         default_modules(ctx, backend) if module_factories is None else tuple(module_factories)
     )
     registry = ModuleRegistry([factory() for factory in factories])
-    return App(ctx=ctx, registry=registry, gateway=Gateway(ctx, registry))
+    return App(ctx=ctx, registry=registry, gateway=Gateway(ctx, registry), backend=backend)

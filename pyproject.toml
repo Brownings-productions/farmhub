@@ -53,7 +53,13 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # starlette's TestClient imports a deprecated anyio alias at module level. Someone
+    # else's deprecation, on an import we do not control; scoped as narrowly as the
+    # filter syntax allows so our own deprecations still fail the run.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
 
 [tool.importlinter]
 root_package = "farmhub"

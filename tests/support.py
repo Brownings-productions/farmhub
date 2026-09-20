@@ -42,6 +42,7 @@ class StubLLM:
         self.reply = reply
         self.tool_calls = tool_calls
         self.structured_result = structured_result
+        self.closed = False
         # What the caller actually sent, so a test can assert on the messages and the
         # tool list the server built (SPEC §3.6).
         self.chats: list[tuple[tuple[ChatMessage, ...], tuple[ToolSpec, ...]]] = []
@@ -77,6 +78,15 @@ class StubLLM:
     ) -> Mapping[str, Any]:
         self.chats.append((tuple(messages), ()))
         return self.structured_result if self.structured_result is not None else {}
+
+    # --- the LLMService half, so this can stand in for the real backend entirely ---
+
+    async def probe(self) -> str:
+        """Always available. A stub that could be "down" is a different double."""
+        return "stub-model"
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class MemoryAuditSink:

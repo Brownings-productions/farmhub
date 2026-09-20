@@ -17,13 +17,13 @@ lands at the milestone shown. **todo** = not yet possible.
 | 3 | The `action` turn tool list contains no `reads_untrusted_content` tool | M6 | todo |
 | 4 | After an untrusted tool result, a T1+ call in that turn is denied and audited, no HA call | M6 | todo |
 | 5 | A classifier failure (bad JSON, timeout) routes to `question` | M6 | todo |
-| 6 | No satellite identity, or an unknown one, receives only T0 tools | M6 (identity: M1) | todo |
+| 6 | No satellite identity, or an unknown one, receives only T0 tools | M6 (identity: M1) | partial: identity resolves to a T0 ceiling and an empty scope (`test_api_identity.py`); the per-scope tool list at M6 |
 | 7 | A T2 call without confirmation produces no HA service call | M8 | todo |
 | 8 | A PendingAction past its TTL is rejected | M8 | todo |
 | 9 | A confirmation from a different session is rejected | M8 | todo |
 | 10 | A push confirmation from a device not in the area's `confirmers` is rejected | M8 | todo |
 | 11 | A PendingAction cannot be confirmed twice | M8 | todo |
-| 12 | Scope filtering: the workshop scope cannot reach greenhouse tools | M6 | todo |
+| 12 | Scope filtering: the workshop scope cannot reach greenhouse tools | M6 | partial: the workshop scope excludes greenhouse (`test_api_identity.py`); tool-list filtering at M6 |
 | 13 | Every executed tool call produced exactly one audit row | M0, extended at M2 (JSONL, Postgres) | partial: gateway writes intent + one outcome row (`test_gateway.py`) |
 | 14 | Dry-run mode issues zero outbound HA service calls | M6 (HA client: M5) | todo |
 | 15 | A tool config referencing a missing HA script fails startup | M5/M6 | todo |
@@ -52,15 +52,21 @@ lands at the milestone shown. **todo** = not yet possible.
 | The Postgres audit role cannot UPDATE or DELETE, and the trigger rejects both | M2 | todo |
 | A tool file with an error fails startup before any HA connection is attempted | M5 | todo |
 | A call to a tool of a not-yet-connected or degraded module, including a T3 declaration while HA is down, is denied and audited with the correct tier, not as an unknown tool | M5 | todo |
-| Client-supplied `tools` and system prompts are ignored | M1 | todo |
-| Sessions are minted server-side and bound to the authenticated identity; the bearer token is required on the chat and confirm endpoints | M1 | todo |
+| Client-supplied `tools` and system prompts are ignored | M1 | done: `test_api_identity.py` |
+| Sessions are minted server-side and bound to the authenticated identity; the bearer token is required on the chat endpoint | M1 (confirm endpoint: M8) | done: `test_api_identity.py`, `test_sessions.py` |
 | Action turns receive only the current utterance: replayed history is dropped, including the follow-up turn of a `mixed` flow | M6 | todo |
 | Free-text T0 results are stripped or marked untrusted; `query_service_history` is untrusted | M5 | todo |
 | A T3 declaration with an actuating handler or script is rejected by the loader | M5/M6 | todo |
 | `"*"` in `allowed_scopes` is rejected on T2 tools | M5/M6 | todo |
 | `max_runtime_s` is validated against parameter maximums | M5 | todo |
-| A satellite tier ceiling above T2 is rejected | M6/M9 | todo |
+| A satellite tier ceiling above T2 is rejected | M1 | done: `test_satellites.py` |
 | Optional parameters are generated as required-but-nullable | M6 | todo |
 | In dry-run a T2 call still creates a PendingAction and needs confirmation; push is simulated | M8 | todo |
 | PendingAction rows are expired and audited at startup; duplicate HA events are idempotent | M8 | todo |
 | The printer uploader never sends a start flag (Q7) | M12 | todo |
+| No source file imports vLLM, and only `modules/llm` imports the openai SDK | M1 | done: `tests/safety/test_llm_boundary.py`, plus a `lint-imports` contract |
+| Identity is never taken from message content; only headers are read | M1 | done: `test_api_identity.py` |
+| An `action` turn receives only the current utterance | M6 | partial: the endpoint forwards only the latest user message (`test_api_identity.py`); the action pipeline at M6 |
+| A model profile must pin a commit sha and carry measured numbers | M1 | done: `tests/unit/test_config.py` |
+| The server refuses to start with no API token configured | M1 | done: `tests/unit/test_api.py` |
+| A module whose dependency goes away is degraded by health polling | M1 | done: `tests/unit/test_registry.py` |

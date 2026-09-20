@@ -1,0 +1,40 @@
+# Satellite registry (SPEC §3.6, §8.8). Copy to config/satellites.toml (gitignored)
+# and point [satellites] registry at it in farmhub.toml.
+#
+# This file decides what each satellite may reach. It is not a convenience:
+#
+#   - device_id is what the Home Assistant conversation integration sends. HA vouches
+#     for it; FarmHub does not verify it independently. Anyone holding the bearer
+#     token could assert any device_id, so the token is the real security boundary
+#     and this file bounds the blast radius.
+#   - A device_id that is not listed here is served T0 tools only, and the request is
+#     logged as a warning (§3.6 fail closed). Nothing is guessed.
+#   - scope is the set of areas a satellite may act on. The workshop satellite cannot
+#     reach greenhouse valves because greenhouse is not in its scope.
+#   - tier_ceiling may not exceed CONFIRMED (T2). T3 is never reachable through the
+#     model under any configuration (§3.2).
+#
+# M9 adds input mode. `confirmers` are configured per area, not here (§3.3).
+#
+# Find a device_id in Home Assistant under Settings > Devices, or in the log line
+# FarmHub writes when it rejects an unknown one.
+
+[satellites.kitchen]
+device_id = "replace-with-kitchen-device-id"
+home_area = "kitchen"
+scope = ["kitchen", "greenhouse"]
+tier_ceiling = "CONFIRMED"
+
+[satellites.barn]
+device_id = "replace-with-barn-device-id"
+home_area = "barn"
+scope = ["barn"]
+# Barn heating is T3 and lives in deterministic HA automations regardless; this
+# ceiling only limits what the model can be offered (§3.2).
+tier_ceiling = "COMFORT"
+
+[satellites.workshop]
+device_id = "replace-with-workshop-device-id"
+home_area = "workshop"
+scope = ["workshop"]
+tier_ceiling = "COMFORT"

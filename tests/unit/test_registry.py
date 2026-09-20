@@ -5,7 +5,7 @@ from support import StubModule, make_app_context, make_tool
 
 from farmhub.core.context import AppContext
 from farmhub.core.errors import ConfigError, DependencyUnavailable, ModuleLoadError
-from farmhub.core.protocols import HealthState, Module, Tier
+from farmhub.core.protocols import HealthReport, HealthState, Module, Tier, ToolSpec
 from farmhub.core.registry import BackoffPolicy, ModuleRegistry, ModuleStatus
 
 
@@ -188,3 +188,86 @@ async def test_health_aggregates_module_states() -> None:
     assert report["ha"].status is HealthState.DEGRADED
     assert "HA unreachable" in report["ha"].detail
     await registry.shutdown()
+
+
+async def _no_sleep(delay: float) -> None:
+    """Never actually wait: these tests drive polling by calling poll_health directly."""
+    await asyncio.sleep(0)
+
+
+# --- health polling (M1) --------------------------------------------------------------
+
+
+class FlakyModule(StubModule):
+    """A module whose health can be switched from outside."""
+
+    def __init__(self, name: str, tools: list[ToolSpec] | None = None) -> None:
+        super().__init__(name, tools)
+        self.healthy = True
+        self.raises: Exception | None = None
+
+    async def health(self) -> HealthReport:
+        if self.raises is not None:
+            raise self.raises
+        state = HealthState.HEALTHY if self.healthy else HealthState.UNHEALTHY
+        return HealthReport(state, "" if self.healthy else "backend went away")
+
+
+async def test_polling_degrades_a_module_whose_dependency_went_away() -> None:
+    """Otherwise it stays RUNNING and keeps its tools in every tool list."""
+    tool = make_tool("read")
+    module = FlakyModule("m", tools=[tool.spec])
+    registry = ModuleRegistry([module], sleep=_no_sleep)
+    await registry.startup(make_app_context())
+    assert registry.available_tools() == [tool.spec]
+
+    module.healthy = False
+    await registry.poll_health()
+
+    assert registry.status()["m"] is ModuleStatus.DEGRADED
+    assert registry.available_tools() == []
+    await registry.shutdown()
+
+
+async def test_a_health_check_that_raises_counts_as_unhealthy() -> None:
+    """Fail closed: an unanswerable health question is not a healthy answer."""
+    module = FlakyModule("m")
+    registry = ModuleRegistry([module], sleep=_no_sleep)
+    await registry.startup(make_app_context())
+
+    module.raises = RuntimeError("socket is gone")
+    await registry.poll_health()
+
+    assert registry.status()["m"] is ModuleStatus.DEGRADED
+    await registry.shutdown()
+
+
+async def test_polling_leaves_a_healthy_module_running() -> None:
+    module = FlakyModule("m")
+    registry = ModuleRegistry([module], sleep=_no_sleep)
+    await registry.startup(make_app_context())
+    await registry.poll_health()
+    assert registry.status()["m"] is ModuleStatus.RUNNING
+    await registry.shutdown()
+
+
+async def test_a_degraded_module_is_not_polled() -> None:
+    """Its retry loop already owns recovery; polling it too would double up."""
+    module = FlakyModule("m")
+    registry = ModuleRegistry([module], sleep=_no_sleep)
+    await registry.startup(make_app_context())
+    module.healthy = False
+    await registry.poll_health()
+    calls_before = module.events.count("startup")
+    await registry.poll_health()
+    assert module.events.count("startup") == calls_before
+    await registry.shutdown()
+
+
+async def test_shutdown_cancels_the_health_poller() -> None:
+    registry = ModuleRegistry([FlakyModule("m")], sleep=_no_sleep)
+    await registry.startup(make_app_context())
+    registry.start_health_polling(0.01)
+    await registry.shutdown()
+    # A second start_health_polling would be a no-op if the task were still alive.
+    assert registry._health_task is None

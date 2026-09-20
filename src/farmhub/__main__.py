@@ -104,6 +104,39 @@ def config_check(ctx: typer.Context) -> None:
         typer.echo(f"WARNING: {event}: {detail}", err=True)
 
 
+@app.command("serve")
+def serve(ctx: typer.Context) -> None:
+    """Run the HTTP server the Home Assistant conversation agent calls.
+
+    Binds to the configured address, which defaults to loopback; a non-loopback bind
+    is logged as a warning at startup (SPEC §3.6). Starting with no API token
+    configured is an error, not a warning: the token is what authenticates HA.
+
+    The LLM backend need not be running. The llm module starts degraded and is
+    retried, so the server comes up either way and says so in its health.
+    """
+    import uvicorn
+
+    from farmhub.api.server import create_app
+
+    options: CliOptions = ctx.obj
+    settings = load_cli_settings(options)
+    try:
+        api = create_app(settings)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(EXIT_INVALID_CONFIG) from exc
+
+    uvicorn.run(
+        api,
+        host=settings.api.bind_host,
+        port=settings.api.port,
+        # structlog already owns the log configuration; uvicorn's own would double
+        # every line and undo the JSON formatting.
+        log_config=None,
+    )
+
+
 def main() -> None:
     """Console-script entry point."""
     app()

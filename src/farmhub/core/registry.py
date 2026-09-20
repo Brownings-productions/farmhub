@@ -78,6 +78,7 @@ class ModuleRegistry:
         self._sleep = sleep
         self._ctx: AppContext | None = None
         self._log: structlog.typing.FilteringBoundLogger = structlog.get_logger("farmhub.registry")
+        self._health_task: asyncio.Task[None] | None = None
 
     async def startup(self, ctx: AppContext) -> None:
         """Start every module in order. See the module docstring for the failure policy."""
@@ -150,6 +151,41 @@ class ModuleRegistry:
         if entry.status is ModuleStatus.RUNNING:
             await self._degrade(entry, reason)
 
+    def start_health_polling(self, interval_s: float) -> None:
+        """Poll running modules so a dependency that goes away is noticed.
+
+        Without this, a module stays RUNNING and keeps its tools in every tool list
+        long after its backend disappeared: nothing would find out until the next call
+        failed. An unhealthy report routes into the same degrade-and-retry path as a
+        failed startup, so recovery is already handled.
+
+        Only RUNNING modules are polled. A degraded one already has a retry loop.
+        """
+        if self._health_task is not None and not self._health_task.done():
+            return
+        self._health_task = asyncio.create_task(self._health_loop(interval_s))
+
+    async def poll_health(self) -> None:
+        """One polling pass. Separate from the loop so tests need no wall-clock wait."""
+        for entry in list(self._entries):
+            if entry.status is not ModuleStatus.RUNNING:
+                continue
+            name = entry.module.name
+            try:
+                report = await entry.module.health()
+            except Exception as exc:  # noqa: BLE001 - a health check that raises is unhealthy
+                self._log.warning("health_check_raised", module=name, error=str(exc))
+                await self.mark_unhealthy(name, f"health check raised: {exc}")
+                continue
+            if report.status is HealthState.UNHEALTHY:
+                self._log.warning("module_unhealthy", module=name, detail=report.detail)
+                await self.mark_unhealthy(name, report.detail or "reported unhealthy")
+
+    async def _health_loop(self, interval_s: float) -> None:
+        while True:
+            await self._sleep(interval_s)
+            await self.poll_health()
+
     async def _start(self, entry: _Entry) -> None:
         ctx = self._require_ctx()
         entry.attempted = True
@@ -213,6 +249,10 @@ class ModuleRegistry:
             return
 
     async def _rollback(self) -> None:
+        if self._health_task is not None:
+            self._health_task.cancel()
+            await asyncio.gather(self._health_task, return_exceptions=True)
+            self._health_task = None
         retries = [e.retry for e in self._entries if e.retry is not None]
         for task in retries:
             task.cancel()
