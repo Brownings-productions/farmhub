@@ -4,9 +4,10 @@ One short entry per architectural choice, dated. Status tags:
 
 - **In force (M0)**: implemented in M0.
 - **Recorded**: decided now, implemented at the named milestone.
-- **Needs v1.2**: differs from the current text of SPEC.md. It is not in force until the SPEC v1.2 patch is reviewed and accepted.
+- **Accepted (SPEC v1.2, 2026-09-20)**: differed from SPEC v1.1 and is now part of the accepted SPEC v1.2. The entry says which parts are implemented.
+- **Accepted (SPEC v1.3)**: part of the accepted SPEC v1.3 (2026-09-20), which amends §2 and §11 only.
 
-SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19.
+SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule.
 
 ---
 
@@ -25,7 +26,7 @@ Fail-safe defaults are allowed in code (dry-run on, TTL 120 s, T2 rate limit). T
 GitHub Actions for CI. `uv_build` as the build backend (ships with uv, so it adds no third-party dependency). uv-managed Python 3.12 (`uv python pin 3.12`), not the system interpreter. **In force (M0).**
 
 ### 2026-09-19: `farmhub config check`; audit types only in M0
-Extra CLI command that validates config and prints the effective safety settings. `AuditEntry` and `AuditSink` exist as types only in M0. Sinks come later (JSONL at M5/M6, Postgres at M2). **In force (M0).**
+Extra CLI command that validates config and prints the effective safety settings. `AuditEntry` and `AuditSink` exist as types only in M0. Sinks come at M2 (JSONL and Postgres; see the Q8 plan below). **In force (M0).**
 
 ### 2026-09-19: `core/gateway.py` is the single enforcement point
 Every tool call (tier, scope, rate limit, taint, dry-run, audit, PendingAction lifecycle) passes through it. Modules supply handlers and clients only. mypy-strict. Safety test: no handler can be invoked except through the gateway. Settles item 2. Refines §3.2 and §8.1, which put enforcement in the `ha` module, and §5, which has no home for it. **In force (M0)** for the sealing mechanism and fail-closed skeleton. Policy checks land at M5/M6.
@@ -47,8 +48,20 @@ An action turn receives the current utterance plus a fixed server-side system pr
 
 Refines §3.7 and §9. **In force (M0)** for the types and the gateway's fail-closed behaviour.
 
-### 2026-09-19: Audit sink composition when Postgres is down
-Leaning yes, decide at M2: JSONL is the mandatory write-ahead record (a failed JSONL write means deny). Postgres is written as well, with idempotent catch-up from JSONL after an outage, so a DB outage does not deny every tool. **Recorded (M2).**
+### 2026-09-20: Audit sinks when Postgres is down: the JSONL sink is planned for M2 (Q8)
+Direction accepted 2026-09-20 (it was "leaning yes, decide at M2"): JSONL is the mandatory write-ahead record, and a failed JSONL write denies the call. Postgres is written as well, with idempotent catch-up from JSONL, so a database outage does not deny every tool. This moves the JSONL sink from M5/M6 to M2, alongside the Postgres sink. SPEC §11's M2 row said the composition is merely "decided"; it now says the JSONL sink is implemented (SPEC v1.3, row 8).
+
+Plan for M2:
+- **`JsonlAuditSink`** in `core/audit.py` (mypy-strict). One JSON object per line (UUIDs and datetimes as strings, enums by value, tier as an int). File opened append-only and created 0600. Each entry is a single `write`, then flush and fsync before `write()` returns, so the intent row is on disk before any handler runs. Blocking IO runs off the event loop and writes are serialized by a lock. Any `OSError` (disk full, permission, missing directory) becomes `AuditWriteError`, so the gateway denies.
+- **Path** comes from config (`audit.jsonl_path`). Startup opens the file for append and fails fast if it cannot (a core failure). The effective path is logged and printed by `config check`. Whether it needs an explicit value or a development default is settled at M2 under the safety-defaults policy.
+- **`PostgresAuditSink`** in `storage/` (`core` cannot import `storage`). Its DB role has INSERT only, plus a trigger that rejects UPDATE and DELETE. `(call_id, phase)` is unique, because each call has exactly one intent and one outcome row, so it is the idempotency key. Inserts use `ON CONFLICT DO NOTHING`, which needs no UPDATE privilege.
+- **Composite sink**, wired in `app.py`: write to JSONL first (failure raises `AuditWriteError`), then to Postgres. A Postgres failure logs a warning, marks the sink behind, and never denies the call. With no database configured the JSONL sink runs alone.
+- **Catch-up** runs at startup and after the database recovers (on the `module.recovered` event): it replays JSONL rows not yet in Postgres, from a byte-offset checkpoint kept in a small table. Replay is idempotent, so restarting from any offset is safe. A torn last line (crash mid-write) is skipped and logged, not fatal. Rows can reach Postgres out of order, so consumers order by the entry's timestamp, not by insertion order.
+- **Rotation** is not in the first cut. Copy-truncate rotation would break both append semantics and the offset checkpoint, so it must not be used; settle a scheme before the file grows large and note it in the RUNBOOK. `chattr +a` on the file is optional hardening. The hash chain stays deferred.
+- `UnconfiguredAuditSink` (M0) remains as a test double; `build_app` will wire the composite sink.
+- Tests are listed in `docs/SAFETY_CHECKLIST.md`.
+
+Extends the 2026-09-19 audit semantics. **Recorded (M2).**
 
 ### 2026-09-19: Provisional protocols; mypy scope; phased import-linter
 - Protocols named but not specified in §6 (`LLMBackend`, `Retriever`, `Embedder`, `Reranker`, `DocumentParser`, `Chunker`, `ToolCall`, `HealthReport`) get minimal shapes in M0. Any change is logged at the milestone that first uses them.
@@ -67,9 +80,9 @@ Optional parameters become required-but-nullable in generated schemas, so strict
 ### 2026-09-19: HA tools are TOML script wrappers; non-HA tools are Python
 Every HA-actuating tool is a TOML declaration wrapping one HA script. Non-HA tools (records, cad) are Python `ToolSpec`s through the same gateway. Parameterized tools use enums or bounded numbers only, never free-text entity or service arguments. "No Python to add a tool" applies to HA tools. Refines §3.1 and §7. **Recorded (M5/M6).**
 
-### 2026-09-19: Voice confirmation via a fixed HA intent (proposed Q6)
-A fixed HA intent ("confirm" / "bekreft"), handled deterministically by HA, calls a FarmHub confirm endpoint with the satellite's `device_id`. It confirms the single pending action for that satellite's session. With zero or several pending, it does nothing and says so. Not model-interpreted. Add to §14 as Q6, finalize at M8.
-**Needs v1.2:** §3.3 as written requires a structured callback *carrying the UUID*. This design does not carry one. The v1.2 patch must amend §3.3 before M8. To settle at M8: read the exact arguments aloud in the confirmation prompt, and what a stray "confirm" heard near a satellite can do.
+### 2026-09-19: Voice confirmation via a fixed HA intent (Q6)
+A fixed HA intent ("confirm" / "bekreft"), handled deterministically by HA, calls a FarmHub confirm endpoint with the satellite's `device_id`. It confirms the single pending action for that satellite's session. With zero or several pending, it does nothing and says so. Not model-interpreted. Q6 is in §14, to finalize at M8.
+**Accepted (SPEC v1.2, 2026-09-20)** as §3.3 form (b), amending the earlier requirement that every satellite confirmation carry the UUID. It stays provisional until Q6 is finalized at M8. To settle at M8: read the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions. **Recorded (M8).**
 
 ### 2026-09-19: Service-to-service bearer token
 A shared bearer token for `/v1/chat/completions` and the confirm endpoint, a configurable bind address, and a firewall to the `ha` host. §13 means no user accounts; service tokens are fine. Settle with Q1 at M1. **Recorded (M1).**
@@ -87,7 +100,7 @@ Free-text results are typed-and-stripped or marked untrusted. `query_service_his
 - (d) The code default stays ON permanently. Production config sets it off explicitly, and startup logs a warning when it is off.
 - (e) Settable from every layer. The effective value is logged at startup.
 
-**Needs v1.2:** (c) contradicts §3.8 as written ("every tool at T1 and above ... returns a simulated success"), and (e) differs from "flag and env var". CLAUDE.md ("ON by default until M7") also needs updating. Not implemented until v1.2 is accepted. Until then the M0 default (ON, all layers) is the only part in force.
+**Accepted (SPEC v1.2, 2026-09-20)** as §3.8, including (c) (external effects only, which amended "every tool at T1 and above ... returns a simulated success") and (e) (all layers, which amended "flag and env var"). CLAUDE.md's dry-run line was updated to match and stays. In force (M0): (d) the code default ON, and (e) settable from every layer with the effective value available in `config check`. Wiring the startup warning into server startup arrives with M1. (a) to (c) are implemented with the dry-run policy at M6, and production config turns dry-run off at M7.
 
 ### 2026-09-19: T3 declarations are status-only
 The loader rejects any T3 entry with an actuating handler or script. Reconciles §3.2, §3.9 and §7. **Recorded (M5/M6).**
@@ -106,13 +119,15 @@ Tool TOML carries `max_runtime_s`, validated against parameter maximums, plus a 
 - **Q7 (M12):** printer stack (Moonraker / OctoPrint / PrusaLink). The uploader never sends a start flag or enables auto-start, with a test.
 - **Q3 (M6):** T0/T1 rate-limit values, still open. "Per-session" is now well-defined by the session decision.
 
-To be added to §14 in the v1.2 patch. **Recorded.**
+Added to §14 in SPEC v1.2 (accepted 2026-09-20), together with Q8. **Recorded.**
 
 ### 2026-09-19: §9 tests land with their subject
 Each §9 test lands in the milestone that creates its subject. Checklist kept in `docs/SAFETY_CHECKLIST.md`. Refines §11 M6 ("all of §9 passes"). **In force (M0)** for the checklist.
 
 ### 2026-09-19: Per-model LLM profiles
 The config schema carries per-model profiles (model id, quantization, `gpu_memory_utilization`, `max_model_len`), including a single-GPU profile with a smaller model. The §2 numbers were wrong (about 30 GB of FP8 weights exceed 0.90 x 32 GB). The model settles at M1. First candidate is the same model in NVFP4, evaluated on tool-call fidelity and part numbers. **Recorded (M1).**
+
+Superseded in part by the 2026-09-20 hardware entry below: the single-GPU profile is now the default rather than a degradation and keeps the primary model, the profile gains `revision`, `kv_cache_dtype`, `weights_gb`, `kv_cache_gb`, `aux_reserve_gb` and `measured_by`, and "the same model in NVFP4" turned out not to exist as a vendor build — see that entry for the candidate list that replaces it.
 
 ---
 
@@ -132,7 +147,7 @@ It must be an object schema with `additionalProperties: false` (§6, §7), other
 
 ### 2026-09-19: Registry behaviour beyond the SPEC
 - `find_tool` (gateway only) returns any registered tool including T3 and tools of degraded modules, so a denial is audited with the correct tier. `available_tools` never lists T3 and only lists RUNNING modules.
-- Known limitation: a module that is degraded from its very first start has never returned its tools, so a call to one of them is audited as an unknown tool. It is still denied.
+- Known limitation: a module that is degraded from its very first start has never returned its tools, so a call to one of them is audited as an unknown tool. It is still denied. Resolved at M5 by the load/startup split (2026-09-20 entry below).
 - The registry calls `Module.shutdown()` after a failed or degraded startup and before each retry, so modules must make `shutdown` idempotent. An unexpected (non-dependency) error during a retry marks the module FAILED and stops retrying.
 - Periodic health polling of running modules is deferred to M1, when the first real module needs it. Modules can already call `mark_unhealthy`.
 
@@ -144,5 +159,28 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 ### 2026-09-19: The safety-suite guard converts xfail as well as skip
 `tests/safety/conftest.py` marks skipped and xfailed reports as failed and clears `wasxfail`. Without clearing it, pytest still filed an xfail under "xfailed" and exited 0 while printing "1 failed"; `tests/unit/test_safety_conftest.py` found this. **In force (M0).**
 
-### 2026-09-19: CI workflow action versions are unverified
-`.github/workflows/ci.yml` uses `actions/checkout@v4` and `astral-sh/setup-uv@v6`, written without network access to confirm current versions. Confirm on the first run. **In force (M0).**
+### 2026-09-19: CI workflow action versions
+`.github/workflows/ci.yml` uses `actions/checkout@v4` and `astral-sh/setup-uv@v6`, written without network access to confirm current versions. The first CI run was green on 2026-09-20, which confirms them. **In force (M0).**
+
+---
+
+## Decided after M0 (2026-09-20)
+
+### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists
+The hardware plan changed. hub is no longer the repurposed desktop: it is a new build that does not exist yet. There is one RTX 5090, currently in the dev PC (ClevatessPrime, Windows + WSL2); it moves to hub when hub is built, and the dev PC then takes an RTX 5080 16 GB. hub is specified with a free PCIe x16 slot and PSU headroom for an optional 8–12 GB auxiliary card, bought or not after M1 measures what the single-GPU profile leaves. The RTX 3070 is gone from the plan.
+
+Consequences, all in §2 and §11 only — **no §3 rule is touched**:
+
+- **The single-GPU profile is the default.** vLLM, faster-whisper, BGE-M3 and the reranker share the 5090. "The 5090 serves the LLM and nothing else" is kept, but scoped to the optional dual-GPU profile. The old rule was the only thing preventing an auxiliary model from starving the LLM, so it is replaced rather than deleted: every profile declares `aux_reserve_gb`, config validation rejects a profile whose `weights_gb + kv_cache_gb + aux_reserve_gb` exceeds the card or whose `gpu_memory_utilization` does not leave the reservation free, and vLLM starts before the auxiliary models so its fraction is computed against a known-free card.
+- **Budget numbers are measured, not estimated.** `weights_gb` and `kv_cache_gb` come from an M1 evaluation run on the real card and carry the run id that produced them. A profile with hand-written numbers is rejected. Note the limit honestly: this is arithmetic over declared numbers, not a live VRAM probe (NVML is not on the §12 list and would be hub-only). The real OOM guard stays vLLM's preflight plus the measured numbers.
+- **Every profile pins a `revision` (commit sha).** A tag is not a pin: one NVFP4 upload of Qwen3.6-35B-A3B was silently replaced on 2026-07-10 with looping weights. The eval harness refuses an unpinned profile and verifies the resolved sha.
+- **`kv_cache_dtype` is a declared, evaluated field.** FP8 KV cache has reported quality collapse on this hybrid architecture, so M1 measures each candidate at the default dtype and at FP8, on quality as well as memory.
+- **Model candidates.** Repository IDs verified 2026-09-20. There is no vendor NVFP4 build of `Qwen3-30B-A3B-Instruct-2507` — `nvidia/Qwen3-30B-A3B-NVFP4` and `RedHatAI/Qwen3-30B-A3B-NVFP4` quantize the older *Base* model and the NVIDIA one targets TensorRT-LLM. On sm_120 (consumer Blackwell) vLLM's NVFP4 MoE dispatch has open bugs and ModelOpt checkpoints fall back to Marlin W4A16 with a "no native FP4 support" warning, so a run can look like NVFP4 without being it and the eval records the kernel actually selected. `Qwen/Qwen3.6-35B-A3B` (`nvidia/Qwen3.6-35B-A3B-NVFP4`) is therefore added as candidate A: same 35B/3B-active MoE shape, and the only candidate with an official vLLM recipe validated on the RTX 5090. It is multimodal, so FarmHub runs it text-only — §1 has no multimodal path and the vision tower's memory is memory the KV cache needs.
+- After the swap the dev PC uses vLLM on hub over the LAN, with a small-model 5080 profile as the offline fallback. Config, not code.
+
+Accepted as SPEC v1.3 (2026-09-20). The model itself is chosen at M1 from `docs/MODEL_EVAL.md`. **Accepted (SPEC v1.3)**; the profile fields and their validation are **Recorded (M1)**.
+
+### 2026-09-20: Tool declarations load before dependencies connect (registry contract change at M5)
+The `ha` module loads and validates its tool TOML files (config: fail fast on any error) before it connects to HA (dependency: degradable). Its tools, including T3 declarations, are therefore registered even when HA is down, and the gateway audits a call to any of them with the correct tier and the reason "module not running", never as an unknown tool. This resolves the M0 known limitation.
+
+The registry contract changes when M5 lands. Proposed shape: split the `Module` lifecycle into a config phase and a dependency phase, for example `configure(ctx)` (validates config and produces the tool list; no dependency I/O; raises `ConfigError`; run for every module before any `startup`) and `startup(ctx)` (connects; `DependencyUnavailable` starts the module degraded). The registry registers a module's tools after `configure` and marks them unavailable until `startup` succeeds. The exact signature settles at M5 and SPEC §6 is updated then; the M0 contract is unchanged until then. Modules with static tools benefit the same way. **Recorded (M5).**

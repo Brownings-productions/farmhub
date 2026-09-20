@@ -2,7 +2,24 @@
 
 A local-first AI hub for a Norwegian homestead: RAG over farm documents, voice satellites, Home Assistant control, web lookups, and parametric CAD generation. Single Python spine, pluggable modules.
 
-Version 1.2. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+Version 1.3. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+
+---
+
+## Changes in v1.3
+
+Folds in the hardware change of 2026-09-20 (see `docs/DECISIONS.md`). **No §3 rule is touched**: this revision amends §2 and §11 only, so unlike v1.2 it needs no safety acceptance.
+
+| # | Section | Change |
+|---|---------|--------|
+| 1 | §2 Machines | `hub` is a **new build that does not exist yet**, not the repurposed desktop. The single RTX 5090 sits in the dev PC until `hub` is built; the dev PC then takes an RTX 5080 16 GB. The RTX 3070 is gone. A `dev` row is added. |
+| 2 | §2 GPU assignment | The **single-GPU profile is the default**: LLM and auxiliary models share the 5090. "The 5090 serves the LLM and nothing else" is kept but scoped to the optional dual-GPU profile. Every profile declares `aux_reserve_gb`, validated in config, and vLLM starts before the auxiliary models. |
+| 3 | §2 GPU assignment | A profile's memory budget is **measured, not estimated**: `weights_gb` and `kv_cache_gb` come from an M1 evaluation run on the real card and carry the run that produced them. |
+| 4 | §2 Models | Verified Hugging Face repository IDs recorded, with the sm_120 NVFP4 caveat. `Qwen/Qwen3.6-35B-A3B` added as a co-candidate, run text-only. |
+| 5 | §2 Models | **New rule:** every profile pins a `revision` (commit sha). A tag is not a pin. |
+| 6 | §2 Models | **New rule:** `kv_cache_dtype` is a declared profile field, evaluated at M1 rather than assumed. |
+| 7 | §2 Inference backend | After the card swap the dev PC uses vLLM on `hub` over the LAN, with a small-model profile on the 5080 as the offline fallback. |
+| 8 | §11 | M1 notes the evaluation runs on the dev PC's 5090 before the card moves. M2's row says the JSONL sink is implemented, not merely decided (Q8). The "no dedicated hardware before M9" note is qualified. |
 
 ---
 
@@ -77,46 +94,73 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 
 | Host | Hardware | Role |
 |------|----------|------|
-| hub | Ubuntu 24.04, RTX 5090 32 GB + RTX 3070 8 GB | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
+| hub | Ubuntu 24.04, RTX 5090 32 GB (second GPU 8–12 GB optional, slot reserved) | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
 | ha | N100 mini PC or Pi 5 + NVMe, Home Assistant OS | Home Assistant and all safety-critical automation |
 | nas | TrueNAS, GTX 1060 | Document corpus, media, backups. The 1060 is for Jellyfin transcoding — never an AI target |
 | sat-* | Raspberry Pi 4/5 | Wyoming voice satellites: kitchen, barn, workshop |
+| dev | ClevatessPrime: Windows + WSL2 + Docker Desktop, currently holding the RTX 5090 | Development, and the M1 model evaluation. Not part of the running system |
 
-hub is the repurposed desktop: wiped to Ubuntu, 5090 already in it, 3070 added in the second slot. The 5090 is power-limited to ~450 W since the machine runs permanently — inference loses very little and it runs cooler and quieter.
+hub is a **new build and does not exist yet**. There is one RTX 5090. It is in the dev PC today and moves to hub when hub is built; the dev PC then takes an RTX 5080 16 GB. Until the swap, M1's model evaluation runs on the dev PC's 5090 — everything it measures is about the card, not the chassis, so the numbers carry over to hub.
+
+hub is specified with a free PCIe x16 slot and PSU headroom for an optional second GPU of 8–12 GB, dedicated to the auxiliary models. Whether to buy it is decided after M1 measures what the single-GPU profile actually leaves. The 5090 is power-limited to ~450 W since the machine runs permanently — inference loses very little and it runs cooler and quieter.
 
 ha is a separate physical machine on purpose. Heating and pumps must keep working when the GPU box is down, being patched, or has thrown a driver fault. This is an architectural rule, not a preference. Never propose collapsing ha into hub.
 
 ### GPU assignment
 
-Hard rule enforced in config: the 5090 serves the LLM and nothing else.
+**The single-GPU profile is the default.** hub starts with one card, so vLLM, faster-whisper, BGE-M3 and bge-reranker-v2-m3 all share the 5090, and each profile says in numbers how that card is divided.
+
+**The dual-GPU profile is optional.** When a second GPU is fitted, the old hard rule applies unchanged — the 5090 serves the LLM and nothing else:
 
 - `CUDA_VISIBLE_DEVICES=0` → vLLM, configured by a model profile (below).
-- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB of 8 GB.
+- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB.
 
-Config carries per-model profiles: model id, quantization, `gpu_memory_utilization` and `max_model_len`. None of these is hard-coded. A profile is valid only if the weights plus KV cache fit its budget, which is verified at M1: the ~30 GB of FP8 weights for the primary model exceed 0.90 × 32 GB, so the 5090 profile needs a different quantization or a verified higher utilization.
+Config carries per-model profiles: model id, `revision`, quantization, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gb`, `kv_cache_gb` and `aux_reserve_gb`. None of these is hard-coded.
 
-If only one GPU is present, config selects a single-GPU profile with a smaller model, loads auxiliary models onto the same device, and logs a warning at startup. Lowering the utilization of the same model is not a valid degradation. Never silently OOM.
+Rules that replace "the 5090 serves the LLM and nothing else" as the default guard, so "never silently OOM" keeps teeth:
+
+- Every profile declares `aux_reserve_gb`, the memory the auxiliary models need. On the dual-GPU profile it is zero, because they live on the other card.
+- Config validation rejects a profile whose `weights_gb + kv_cache_gb + aux_reserve_gb` exceeds the card, and one whose `gpu_memory_utilization` does not leave at least `aux_reserve_gb` free.
+- **vLLM starts before the auxiliary models**, so its utilization fraction is computed against a known-free card rather than against whatever happened to load first.
+- **The budget numbers are measured, not estimated.** `weights_gb` and `kv_cache_gb` come from an evaluation run on the real card (§11 M1, `docs/MODEL_EVAL.md`), and a profile records the run that produced them. A profile carrying hand-written numbers is not a valid profile.
+
+This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible.
+
+FP8 weights for a 30B-class model run to ~30 GB, which exceeds 0.90 × 32 GB before any auxiliary reservation is taken out. The single-GPU profile therefore needs a smaller quantization — see Models below.
+
+After the card swap the dev PC has an RTX 5080 16 GB. Its profile selects a smaller model and loads the auxiliary models onto the same device, logging a warning at startup. Lowering the utilization of the same model is not a valid degradation. Never silently OOM.
 
 ### Models
 
 | Role | Model | Notes |
 |------|-------|-------|
-| LLM | Qwen3-30B-A3B-Instruct, FP8 | MoE, ~3B active. Chosen for tool calling. ~30 GB of weights; fit with KV cache is verified at M1 (see profiles) |
-| LLM fallback | Mistral-Small-3.2-24B-Instruct, AWQ | Profile switch only |
+| LLM candidate A | `Qwen/Qwen3.6-35B-A3B`, NVFP4 at `nvidia/Qwen3.6-35B-A3B-NVFP4` | MoE, 35B total / 3B active, 262K context, function calling and structured output. The only candidate with an official vLLM recipe validated on the RTX 5090: `--quantization modelopt_fp4`, `--block-size 128`, `VLLM_HAS_FLASHINFER_CUBIN=1`, vLLM ≥ 0.28.0, 32 GB caps context at 64K before any auxiliary reservation. Multimodal; **FarmHub runs it text-only** (§1 has no multimodal path, and the vision tower's memory is memory the KV cache needs) |
+| LLM candidate B | `Qwen/Qwen3-30B-A3B-Instruct-2507`, 4-bit AWQ or GPTQ-Int4 | MoE, ~3B active. Chosen originally for tool calling. Official FP8 is `Qwen/Qwen3-30B-A3B-Instruct-2507-FP8` at ~32 GB, which does not fit with a KV cache. No vendor NVFP4 build of this variant exists (see the caveat below), so 4-bit community builds are the realistic path: `stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ`, `JunHowie/Qwen3-30B-A3B-Instruct-2507-GPTQ-Int4`, `Intel/Qwen3-30B-A3B-Instruct-2507-int4-asym-AutoRound` |
+| LLM fallback | `mistralai/Mistral-Small-3.2-24B-Instruct-2506`, AWQ | Profile switch only. No official AWQ; community builds only |
 | STT | faster-whisper large-v3, `int8_float16` | CTranslate2. This compute type requires CUDA |
 | TTS | Piper | CPU, on hub, served over Wyoming. Satellites only play audio |
 | Embeddings | BAAI/bge-m3 | Dense + sparse from one model |
 | Reranker | BAAI/bge-reranker-v2-m3 | Top-30 → top-5 |
 
-**Before M1:** verify the exact Hugging Face repository IDs for the LLM and fallback (current releases carry date suffixes, and FP8/AWQ variants may be separate repos), and record them in `config/farmhub.example.toml` and `docs/DECISIONS.md`. Model IDs live only in config, never in code.
+The repository IDs above were verified on 2026-09-20. Model IDs live only in config, never in code.
 
-Higher precision is preferred over 4-bit because quantization damage shows up first on exactly the things this system does: part numbers, torque figures, tool-call argument fidelity. Because the FP8 weights leave little or no room for KV cache on a 32 GB card, the first candidate to evaluate at M1 is the same model in NVFP4, judged on tool-call fidelity and part numbers. AWQ is the fallback.
+**NVFP4 on sm_120 — the caveat that shaped the table.** The 5090 is consumer Blackwell (sm_120), not datacenter Blackwell. vLLM's NVFP4 MoE backend selection has open bugs there: the device-capability check omits SM12.0, so the kernel dispatch either fails outright or a ModelOpt checkpoint falls back to **Marlin W4A16** with a "no native FP4 support" warning. The memory saving survives that fallback; the FP4 compute does not, and a run can look like NVFP4 without being it. So an evaluation run records which kernel vLLM actually selected, not which one was requested. `nvidia/Qwen3-30B-A3B-NVFP4` and `RedHatAI/Qwen3-30B-A3B-NVFP4` are not a way around this: both quantize the older *Base* model rather than Instruct-2507, and the NVIDIA one targets TensorRT-LLM.
+
+**Every profile pins a `revision` (commit sha).** A tag or a branch is not a pin: one NVFP4 upload of Qwen3.6-35B-A3B was silently replaced on 2026-07-10 with weights that produce looping output, and an unpinned profile would have picked that up on the next pull. The evaluation harness refuses to run an unpinned profile and verifies the resolved sha against the one requested.
+
+**`kv_cache_dtype` is declared and evaluated, never assumed.** FP8 KV cache buys memory, and on this hybrid architecture it has reported quality collapse. M1 measures each candidate at the backend default and at FP8, scoring quality as well as memory; a memory win that costs part-number fidelity is not a win here.
+
+Higher precision is preferred over 4-bit because quantization damage shows up first on exactly the things this system does: part numbers, torque figures, tool-call argument fidelity. That is why the M1 evaluation scores those directly rather than throughput alone, and it is the same reason FP8 KV cache is not taken on trust.
+
+**At M1:** evaluate candidate A first — it is the proof that the NVFP4 stack works on this card at all — then candidate B in 4-bit, then the fallback, each at both KV cache dtypes. Record the whole matrix in `docs/MODEL_EVAL.md`, the chosen profile in `config/farmhub.example.toml` and `docs/DECISIONS.md`.
 
 ### Inference backend
 
 Primary: vLLM, OpenAI-compatible server, automatic prefix caching enabled. The system prompt and tool schemas are near-constant, so prefix caching is the main latency win.
 
 The application talks to the LLM only through an `LLMBackend` protocol implemented by an OpenAI-compatible client. Switching to Ollama must be a config change, never a code change. Do not import vLLM anywhere outside `modules/llm/`.
+
+After the card swap, the dev PC talks to vLLM on hub over the LAN through that same protocol, with a small-model profile on its RTX 5080 as the offline fallback. Both are config, not code.
 
 ## 3. Non-negotiable safety rules
 
@@ -549,8 +593,8 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 | # | Milestone | Done when |
 |---|-----------|-----------|
 | M0 | Scaffold: pyproject, config, logging, AppContext, registry, protocols, CI | `farmhub --version` runs, an empty module loads, CI green |
-| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs and a fitting model profile verified (§2). Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
-| M2 | Storage, migrations, records | Service events insert and query by CLI. Audit sink composition decided (Q8) |
+| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs pinned by revision and a fitting model profile verified against measured numbers (§2), evaluated on the dev PC's 5090 before the card moves to hub. Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
+| M2 | Storage, migrations, records | Service events insert and query by CLI. JSONL audit sink implemented alongside the Postgres sink and its catch-up (Q8) |
 | M3 | ingest: parse, chunk, embed, manifest | Corpus indexes; rerun is a no-op; library check lints |
 | M4 | rag: hybrid retrieval + rerank + search_documents | Cited answers from manuals, with pages |
 | M5 | ha bridge, T0 read-only, audit log | Reports sensor states. Zero write paths exist yet |
@@ -564,7 +608,7 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 
 M5 through M8 are where haste causes real damage. Slow down there. Write each §9 test before the code it guards.
 
-Note: nothing before M9 requires dedicated hardware. M0–M8 can be developed against WSL2, Ollama, or a mocked LLM on any machine.
+Note: nothing before M9 requires *dedicated* hardware. M0–M8 can be developed against WSL2, Ollama, or a mocked LLM on any machine. The one exception is M1's model evaluation, which needs the RTX 5090 itself — it runs on the dev PC while the card is still there. No test in any milestone may require a GPU (§9).
 
 ## 12. Standards
 
