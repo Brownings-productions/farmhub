@@ -15,3 +15,6 @@ config/satellites.toml
 
 # Ollama model blobs (deploy/ollama/compose.yaml default volume)
 /deploy/ollama/models/
+
+# Throwaway Home Assistant state (deploy/dev/ha-compose.yaml)
+/deploy/dev/ha-config/

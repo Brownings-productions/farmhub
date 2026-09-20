@@ -1,0 +1,12 @@
+{
+  "domain": "farmhub",
+  "name": "FarmHub",
+  "codeowners": ["@Brownings-productions"],
+  "config_flow": true,
+  "documentation": "https://github.com/Brownings-productions/farmhub",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Brownings-productions/farmhub/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

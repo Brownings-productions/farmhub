@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "FarmHub",
+        "description": "The address of the FarmHub service and its shared bearer token. The token authenticates Home Assistant to FarmHub; FarmHub decides what each satellite may do.",
+        "data": {
+          "url": "FarmHub URL",
+          "token": "Bearer token"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach FarmHub at that address. Check that the service is running and that the address is reachable from Home Assistant."
+    },
+    "abort": {
+      "already_configured": "This FarmHub service is already configured."
+    }
+  }
+}
