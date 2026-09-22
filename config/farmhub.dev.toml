@@ -1,0 +1,34 @@
+# Development overrides. Committed on purpose: it contains no secrets, and the dev
+# arrangement is worth being able to read.
+#
+#   farmhub --config config/farmhub.dev.toml serve
+#
+# It differs from production in exactly one way that matters, and that difference is
+# announced at startup rather than buried here.
+
+dry_run = true
+
+[logging]
+level = "DEBUG"
+
+[api]
+# The Home Assistant container cannot reach 127.0.0.1 on the WSL host: that address is
+# the container's own loopback. Binding to all interfaces lets it through via
+# host.docker.internal (deploy/dev/ha-compose.yaml).
+#
+# This is a DEVELOPMENT-ONLY value. Startup logs api_bind_not_loopback whenever it is
+# set, and `farmhub config check` prints the same warning, so it cannot travel to hub
+# unnoticed. On hub the bind address is the LAN address and §3.6 requires it to be
+# firewalled to the ha host.
+bind_host = "0.0.0.0"
+port = 8099
+
+# Never a literal token, even in a dev file. Export FARMHUB_API__TOKEN instead:
+#   export FARMHUB_API__TOKEN="$(openssl rand -hex 32)"
+
+[satellites]
+registry = "config/satellites.toml"
+
+[llm]
+base_url = "http://127.0.0.1:8000/v1"
+model = "farmhub-primary"

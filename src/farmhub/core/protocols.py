@@ -12,12 +12,12 @@ milestone that first uses them.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum, StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
 from farmhub.core.errors import ConfigError, SafetyViolation
 
@@ -250,26 +250,82 @@ class Module(Protocol):
 
 @dataclass(frozen=True)
 class ChatMessage:
-    role: str
+    """One turn of a completion.
+
+    Only ``system``, ``user`` and ``assistant`` are needed until tool results have to
+    be fed back, which is M6. The fields that carries (``tool_call_id`` and the rest)
+    are added then, with a note in docs/DECISIONS.md.
+    """
+
+    role: Literal["system", "user", "assistant"]
     content: str
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """Token accounting for one completion (§8.2: "into structured logs")."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 
 @dataclass(frozen=True)
 class LLMResponse:
     content: str | None
     tool_calls: tuple[ToolCall, ...] = ()
+    # "stop", "length", "tool_calls", ... Worth surfacing because a silent "length"
+    # truncation otherwise looks like a short answer.
+    finish_reason: str | None = None
+    usage: TokenUsage | None = None
+    model: str | None = None
 
 
 class LLMBackend(Protocol):
-    """The only way the application talks to an LLM (§2)."""
+    """The only way the application talks to an LLM (§2).
+
+    Implemented by an OpenAI-compatible client, so vLLM, Ollama and a test double are
+    interchangeable by config alone. Nothing here is vLLM-specific.
+    """
 
     async def chat(
-        self, messages: Sequence[ChatMessage], *, tools: Sequence[ToolSpec] = ()
-    ) -> LLMResponse: ...
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """One completion. ``tools`` is built server-side and never client-supplied (§3.6)."""
+        ...
+
+    def stream_chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield content deltas as they arrive.
+
+        No ``tools`` parameter: a streamed turn is for latency-sensitive prose, and
+        tool calls are resolved by ``chat`` where the whole call is seen at once.
+        """
+        ...
 
     async def structured(
-        self, messages: Sequence[ChatMessage], schema: Mapping[str, Any]
-    ) -> Mapping[str, Any]: ...
+        self,
+        messages: Sequence[ChatMessage],
+        schema: Mapping[str, Any],
+        *,
+        schema_name: str = "response",
+    ) -> Mapping[str, Any]:
+        """A completion constrained to ``schema``, for the §4 classifier.
+
+        Issued with no tools. Raises ``LLMError`` if the result does not parse or does
+        not validate, so the caller can apply the safe default rather than guess.
+        """
+        ...
 
 
 @dataclass(frozen=True)

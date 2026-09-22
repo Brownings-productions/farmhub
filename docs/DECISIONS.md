@@ -164,6 +164,91 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 
 ---
 
+## Made while implementing M1
+
+### 2026-09-20: Q1 settled — a custom HA integration passes identity in headers
+A standard OpenAI chat-completions request has no field for the Home Assistant `device_id`, and §3.6 forbids taking satellite identity from message content. The built-in "OpenAI Conversation" integration therefore cannot carry it, and it also builds its own prompt and tool list, which collides with FarmHub building its own. Overloading the `user` field was rejected: FarmHub owns both ends, so a purpose-named header is clearer than a field that means something else.
+
+`custom_components/farmhub/` is a conversation agent kept in this repo. It posts to `/v1/chat/completions` with `Authorization: Bearer …`, `X-FarmHub-Device-Id` and `X-FarmHub-Conversation-Id`, and no tools or system prompt.
+
+**The trust boundary, stated plainly:** the bearer token authenticates Home Assistant and is the only thing FarmHub verifies. `device_id` is an authorization *input* that HA vouches for, not an authentication — anyone holding the token can assert any `device_id`. So the token is the real security boundary, the satellite registry bounds the blast radius, and §3.6's firewall to the `ha` host is load-bearing rather than belt-and-braces.
+
+Consequences implemented at M1:
+- The token has no safe default, so `farmhub serve` refuses to start without one. `config check` and the startup log report only whether one is set, never its value.
+- `api.bind_host` defaults to loopback; a non-loopback value is allowed but logged as a warning on every startup, so the dev arrangement cannot travel to `hub` unnoticed.
+- Sessions are minted server-side and keyed on `(satellite, conversation_id)`, so a conversation id alone can never reach another satellite's session.
+- An unregistered `device_id` is served T0-only with a warning rather than refused: §3.6 asks for limited, not mute, and refusing would make a mis-registered satellite silent.
+- A minimal satellite registry lands now rather than at M9, so the fail-closed path has something to fail closed *against*. M9 extends it with input mode; `confirmers` are per area (§3.3).
+
+Removed from SPEC §14. **In force (M1).**
+
+### 2026-09-20: the eval harness emits the profile, so nobody types the numbers
+`evals/` lives outside `tests/` because it needs a real GPU and SPEC §9 forbids a test that does. It is run by hand; CI never touches it.
+
+- **Pins are checked before anything downloads.** A candidate whose `revision` is not a 40-character commit sha is refused and nothing is fetched. `--check` also reports when a pin has fallen behind upstream, so following a move is a decision rather than a surprise. This is the operational half of the §2 revision rule.
+- **The harness writes the `[profiles.*]` block.** `weights_gb` and `kv_cache_gb` come from vLLM's startup log and go straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
+- A test asserts the emitted block is accepted by `ModelProfile`, so the two halves cannot drift apart without the suite noticing.
+- **The kernel actually selected is recorded**, not the one requested, because an NVFP4 checkpoint on sm_120 can fall back to Marlin W4A16 and the run would otherwise look like NVFP4.
+- **Unparsed numbers stay `None`, never 0.0.** A zero looks like a measurement.
+- The matrix expands each candidate over both KV cache dtypes (§2), and Qwen3.6 is run text-only since FarmHub has no multimodal path and the vision tower's memory is memory the KV cache needs.
+- 5 GB is held back for Whisper, BGE-M3 and the reranker, and usable context is reported as KV tokens ÷ 3 concurrent sessions (§1), not as `max_model_len`.
+- Synthetic data only, committed under `evals/data/`. Scoring is deliberately split: schema violations, invented tools and false positives mean different things, and a single accuracy number would hide which.
+
+**In force (M1).**
+
+### 2026-09-20: `LLMBackend` gains streaming, usage and finish_reason
+`core/protocols.py` marked `LLMBackend` PROVISIONAL, to be revised at the milestone that first uses it. M1 is that milestone. It was too thin for §8.2, which requires streaming and token accounting:
+
+- `LLMResponse` gains `finish_reason`, `usage` (a new `TokenUsage`) and `model`. `finish_reason` is worth surfacing because a silent `length` truncation otherwise looks like a short answer.
+- `stream_chat` is added, yielding content deltas. It takes no `tools`: a streamed turn is for latency-sensitive prose, and tool calls are resolved by `chat`, where the whole call is seen at once.
+- `structured` gains `schema_name` and is documented to raise `LLMError` rather than return something unusable, so the §4 classifier applies its safe default instead of guessing.
+- `ChatMessage.role` is narrowed to `system | user | assistant`. The tool-result fields (`tool_call_id` and the rest) arrive at M6, when tool results first have to be fed back.
+- New `LLMError`, distinct from `DependencyUnavailable`: the latter means the backend is down and the module should start degraded, the former that one call failed.
+
+**In force (M1).**
+
+### 2026-09-20: `AppContext` carries the LLM backend, not the llm module
+`build_app` constructs `OpenAICompatBackend` and puts it in the context; `LlmModule` gets the same object and owns its lifecycle. Constructing the client opens no connection, so building an app stays free of I/O and works with every backend down. The orchestrator can then issue completions without importing `modules.llm`, which keeps SPEC §5's "modules never import each other" intact as the orchestrator lands at M6.
+
+`ENABLED_MODULES` became `default_modules(ctx, backend)` for the same reason: the composition root already holds the concrete object it built, so passing it in beats narrowing the protocol back down. `build_app(settings, [])` still gives an empty app for tests. **In force (M1).**
+
+### 2026-09-20: `respx` cannot test the LLM client; a mock transport does
+SPEC §12 lists `respx` for mocking HTTP in tests, and the M1 plan assumed it. It does not work here: `openai` 3.x uses `httpx2`, while `respx` patches `httpx`, so it never sees the SDK's requests.
+
+Instead `OpenAICompatBackend` takes an `http_client` seam, and `tests/unit/test_llm.py` passes a mock transport from the SDK's own HTTP library. This runs in process with no network and no GPU (§9), and exercises the real client, real serialization and real error mapping rather than a stub.
+
+That parameter is typed loosely (`Any`) on purpose, so the transitive HTTP library is named only in tests and never in `src/`. `openai.Timeout` and `openai.omit` are used in the client for the same reason — the SDK re-exports what is needed, so nothing unapproved appears in the runtime imports. `respx` stays in the dev dependencies for the `web` module at M11, which uses `httpx` directly.
+
+**Worth raising:** if the loose typing or the test-only import is not acceptable, the alternative is writing the client on plain `httpx` instead of the SDK. That is more code but removes the mismatch entirely. **In force (M1).**
+
+### 2026-09-20: the vLLM and SDK import boundaries are enforced twice
+SPEC §2 says not to import vLLM outside `modules/llm/`. In practice nothing imports it at all, because it is a container rather than a library, and that is what keeps "switching to Ollama is a config change" true.
+
+- `lint-imports` gains a `no module imports vllm` contract (which needed `include_external_packages = true`).
+- `tests/safety/test_llm_boundary.py` asserts the same by parsing every source file, plus that only `modules/llm` imports the `openai` SDK. Anywhere else would mean a second way to talk to the model, outside the protocol the gateway and orchestrator are built around.
+
+Both were verified to fail when a violation is introduced. The module-independence contract still waits for a second module. **In force (M1).**
+
+### 2026-09-20: probing the model list, not just the port
+`probe()` calls `/v1/models` and fails with `DependencyUnavailable` if the configured model is not among those served. A backend that answers but serves something else would otherwise silently invalidate the M1 evaluation, and the whole point of pinning a revision is knowing which weights answered. The connect timeout is separate from and much shorter than the request timeout, so a stopped vLLM degrades the module in seconds rather than after a minute. **In force (M1).**
+
+### 2026-09-20: unparseable tool arguments become an empty mapping
+A tool call whose `arguments` are not a JSON object yields `ToolCall(name, {})` rather than raising. Model output is untrusted text, and if malformed arguments raised inside the client, the turn would die before any audit row named the tool that was attempted. Instead the gateway sees a named call, denies it and audits it (§3.7). **In force (M1).**
+
+### 2026-09-20: vLLM is a pinned container started by hand on dev, by systemd on hub
+The inference backend is the official `vllm/vllm-openai` image, defined once in `deploy/vllm/compose.yaml` and used unchanged on both machines. It is a deployment artifact, not a Python dependency: nothing imports vLLM, so SPEC §2's "do not import vLLM outside `modules/llm/`" is satisfied by never importing it at all.
+
+- **Image pinned to `v0.29.0`**, the first release at or above the 0.28.0 that the RTX 5090 NVFP4 recipe requires. Not `:latest`: the NVFP4 kernel path on sm_120 depends on the vLLM version, so an unpinned image would change which kernel is selected without anything in the repo changing.
+- **Start and stop are manual on the dev PC.** Docker Desktop on WSL2 has no systemd socket activation and vLLM has no idle shutdown, so an automatic scheme would mean a bespoke sidecar. `deploy/vllm/vllm.sh` wraps `up | down | restart | wait | status | logs | config | resolve`, and `restart: "no"` in the compose file keeps the container from returning by itself after a Docker Desktop restart. On hub `deploy/systemd/farmhub-vllm.service` runs the same file always-on. An idle-stop sidecar polling `/metrics` is noted in the RUNBOOK as deferred, not built.
+- **The model profile lives entirely in `deploy/vllm/.env`**, interpolated into the compose command, so changing profile never edits YAML and `./vllm.sh config` prints the exact command before anything runs. Required variables use compose's `:?` guard, so a missing revision or model fails loudly rather than starting something unintended. `env.example` is tracked under that name because `.gitignore` excludes `.env.*`.
+- **`./vllm.sh resolve <repo>`** turns a repo name into the commit sha that SPEC §2 requires, so pinning is a command rather than a manual hunt. The five M1 candidates were resolved on 2026-09-20 and their shas recorded in `env.example`; all five repository IDs in SPEC §2 are confirmed to exist.
+- **Neither backend is authenticated**, so both bind to loopback on every host. FarmHub is the only client and carries the §3.6 bearer token.
+- **`deploy/ollama/compose.yaml`** exists so the §2 promise that switching to Ollama is a config change is actually testable. It is a fallback, not a peer.
+
+**In force (M1).**
+
+---
+
 ## Decided after M0 (2026-09-20)
 
 ### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists

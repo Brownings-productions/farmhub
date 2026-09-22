@@ -1,0 +1,48 @@
+{
+  "_comment": "Synthetic manual extracts. Invented machines and figures: no real manual text, and nothing here should be believed outside this harness. Scores exact reproduction of part numbers and torque figures from supplied context (SPEC §2).",
+  "cases": [
+    {
+      "id": "bearing-part-number",
+      "context": "Feltmaskin FM-220 — Vedlikehold — Lagre\n\nDet fremre aksellageret er SKF 6205-2RS. Det bakre er SKF 6307-2Z. Begge skal ha lithium-basert fett NLGI 2.",
+      "question": "Hvilket lager sitter foran?",
+      "must_contain": ["6205-2RS"],
+      "must_not_contain": ["6307-2Z"]
+    },
+    {
+      "id": "torque-figure",
+      "context": "Feltmaskin FM-220 — Maintenance — Fluid capacities and torque\n\nWheel nuts: 205 Nm. Cylinder head bolts: 118 Nm in three stages. Sump plug: 34 Nm.",
+      "question": "What torque do the wheel nuts take?",
+      "must_contain": ["205"],
+      "must_not_contain": ["118", "34"]
+    },
+    {
+      "id": "capacity",
+      "context": "Feltmaskin FM-220 — Fluid capacities\n\nEngine oil with filter: 8,5 liter. Hydraulic system: 41 liter. Coolant: 9,2 liter.",
+      "question": "Hvor mye motorolje tar den med filter?",
+      "must_contain": ["8,5", "8.5"],
+      "must_contain_any": true,
+      "must_not_contain": ["41", "9,2"]
+    },
+    {
+      "id": "filter-designation",
+      "context": "Feltmaskin FM-220 — Filters\n\nEngine oil filter: HF-6172. Fuel filter: FF-2094. Cabin air filter: CA-8831.",
+      "question": "Which fuel filter does it take?",
+      "must_contain": ["FF-2094"],
+      "must_not_contain": ["HF-6172", "CA-8831"]
+    },
+    {
+      "id": "error-code",
+      "context": "Varmestyring VS-9 — Feilkoder\n\nE-04: giverfeil på turledning. E-11: lavt systemtrykk. E-23: sirkulasjonspumpe blokkert.",
+      "question": "Hva betyr E-11?",
+      "must_contain": ["lav", "trykk"],
+      "must_contain_all_lowercase": true
+    },
+    {
+      "id": "absent-from-context",
+      "context": "Feltmaskin FM-220 — Fluid capacities\n\nEngine oil with filter: 8,5 liter.",
+      "question": "What size are the wheel nuts?",
+      "expect_refusal": true,
+      "note": "Not in the context. Inventing a figure is the worst failure mode here: a wrong torque is worse than no answer."
+    }
+  ]
+}

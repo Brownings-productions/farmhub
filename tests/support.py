@@ -1,7 +1,7 @@
 """Shared test doubles: audit sinks, tools and a stub module."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,8 +14,11 @@ from farmhub.core.events import EventBus
 from farmhub.core.protocols import (
     AuditEntry,
     AuditSink,
+    ChatMessage,
     HealthReport,
     HealthState,
+    LLMBackend,
+    LLMResponse,
     Tier,
     ToolCall,
     ToolContext,
@@ -24,6 +27,66 @@ from farmhub.core.protocols import (
 )
 
 EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+class StubLLM:
+    """An ``LLMBackend`` that answers from a script. No HTTP, no backend, no GPU."""
+
+    def __init__(
+        self,
+        reply: str = "stub answer",
+        *,
+        tool_calls: tuple[ToolCall, ...] = (),
+        structured_result: Mapping[str, Any] | None = None,
+    ) -> None:
+        self.reply = reply
+        self.tool_calls = tool_calls
+        self.structured_result = structured_result
+        self.closed = False
+        # What the caller actually sent, so a test can assert on the messages and the
+        # tool list the server built (SPEC §3.6).
+        self.chats: list[tuple[tuple[ChatMessage, ...], tuple[ToolSpec, ...]]] = []
+
+    async def chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.chats.append((tuple(messages), tuple(tools)))
+        return LLMResponse(content=self.reply, tool_calls=self.tool_calls, finish_reason="stop")
+
+    async def stream_chat(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        self.chats.append((tuple(messages), ()))
+        for word in self.reply.split():
+            yield word + " "
+
+    async def structured(
+        self,
+        messages: Sequence[ChatMessage],
+        schema: Mapping[str, Any],
+        *,
+        schema_name: str = "response",
+    ) -> Mapping[str, Any]:
+        self.chats.append((tuple(messages), ()))
+        return self.structured_result if self.structured_result is not None else {}
+
+    # --- the LLMService half, so this can stand in for the real backend entirely ---
+
+    async def probe(self) -> str:
+        """Always available. A stub that could be "down" is a different double."""
+        return "stub-model"
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class MemoryAuditSink:
@@ -127,7 +190,9 @@ class StubModule:
 
 
 def make_app_context(
-    audit: AuditSink | None = None, settings: Settings | None = None
+    audit: AuditSink | None = None,
+    settings: Settings | None = None,
+    llm: LLMBackend | None = None,
 ) -> AppContext:
     log = structlog.get_logger("test")
     return AppContext(
@@ -135,4 +200,5 @@ def make_app_context(
         log=log,
         events=EventBus(log),
         audit=audit if audit is not None else MemoryAuditSink(),
+        llm=llm if llm is not None else StubLLM(),
     )

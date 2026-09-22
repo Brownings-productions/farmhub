@@ -23,8 +23,10 @@ jobs:
         run: uv run ruff check .
       - name: Format check
         run: uv run ruff format --check .
-      - name: Types (core is strict)
-        run: uv run mypy --strict src/farmhub/core
+      # SPEC §12: strict on core, and on each module and protocol implementation as
+      # it lands. modules/llm and api landed at M1.
+      - name: Types (strict)
+        run: uv run mypy --strict src/farmhub/core src/farmhub/modules src/farmhub/api
       - name: Import contracts
         run: uv run lint-imports
       - name: Tests (includes tests/safety, which must never be skipped)

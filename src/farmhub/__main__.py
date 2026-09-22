@@ -77,6 +77,11 @@ def load_cli_settings(options: CliOptions) -> Settings:
         raise typer.Exit(EXIT_INVALID_CONFIG) from exc
 
 
+def _format(value: object) -> str:
+    """Booleans as TOML writes them; everything else as itself."""
+    return str(value).lower() if isinstance(value, bool) else str(value)
+
+
 @config_app.command("check")
 def config_check(ctx: typer.Context) -> None:
     """Validate configuration and print the effective settings, safety ones first."""
@@ -84,11 +89,52 @@ def config_check(ctx: typer.Context) -> None:
     settings = load_cli_settings(options)
     typer.echo("configuration OK")
     for key, value in settings.safety_summary().items():
-        typer.echo(f"safety.{key} = {str(value).lower()}")
+        typer.echo(f"safety.{key} = {_format(value)}")
     typer.echo(f"logging.level = {settings.logging.level}")
     typer.echo(f"logging.file = {settings.logging.file}")
-    if not settings.dry_run:
-        typer.echo("WARNING: dry_run is off; tools at T1+ may reach Home Assistant.", err=True)
+
+    profile = settings.active_profile()
+    if profile is not None:
+        typer.echo(f"profile.repo_id = {profile.repo_id}")
+        typer.echo(f"profile.revision = {profile.revision}")
+        typer.echo(f"profile.kv_cache_dtype = {profile.kv_cache_dtype}")
+        typer.echo(f"profile.measured_by = {profile.measured_by}")
+
+    for event, detail in settings.safety_warnings():
+        typer.echo(f"WARNING: {event}: {detail}", err=True)
+
+
+@app.command("serve")
+def serve(ctx: typer.Context) -> None:
+    """Run the HTTP server the Home Assistant conversation agent calls.
+
+    Binds to the configured address, which defaults to loopback; a non-loopback bind
+    is logged as a warning at startup (SPEC §3.6). Starting with no API token
+    configured is an error, not a warning: the token is what authenticates HA.
+
+    The LLM backend need not be running. The llm module starts degraded and is
+    retried, so the server comes up either way and says so in its health.
+    """
+    import uvicorn
+
+    from farmhub.api.server import create_app
+
+    options: CliOptions = ctx.obj
+    settings = load_cli_settings(options)
+    try:
+        api = create_app(settings)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(EXIT_INVALID_CONFIG) from exc
+
+    uvicorn.run(
+        api,
+        host=settings.api.bind_host,
+        port=settings.api.port,
+        # structlog already owns the log configuration; uvicorn's own would double
+        # every line and undo the JSON formatting.
+        log_config=None,
+    )
 
 
 def main() -> None:

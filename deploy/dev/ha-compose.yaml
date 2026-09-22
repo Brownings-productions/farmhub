@@ -1,0 +1,47 @@
+# A THROWAWAY Home Assistant, for developing the FarmHub integration (SPEC §11 M1).
+#
+# The real `ha` box does not exist yet, and when it does it must never be touched by
+# development: it runs heating and pumps, and §2 makes its independence from hub an
+# architectural rule. This container is not that machine and never talks to it.
+#
+#   docker compose -f deploy/dev/ha-compose.yaml up -d
+#   # open http://localhost:8123, create a throwaway account
+#   # Settings > Devices & Services > Add Integration > FarmHub
+#   docker compose -f deploy/dev/ha-compose.yaml down -v   # -v discards the config
+#
+# Its config volume is gitignored. Discard it whenever it gets confusing; nothing here
+# is worth keeping.
+
+name: farmhub-dev-ha
+
+services:
+  homeassistant:
+    # Pinned: the conversation-agent API changes between releases, and an unpinned
+    # image would move the target under the integration without warning. Raise this
+    # deliberately, and re-test the integration when you do.
+    image: ghcr.io/home-assistant/home-assistant:2026.9
+    container_name: farmhub-dev-ha
+    restart: "no"
+
+    ports:
+      - "127.0.0.1:8123:8123"
+
+    volumes:
+      # Throwaway state. Gitignored; `down -v` is the reset button.
+      - ./ha-config:/config
+      # The integration, live from the working tree. Read-only so the container
+      # cannot write back into the repo.
+      - ../../custom_components/farmhub:/config/custom_components/farmhub:ro
+      - /etc/localtime:/etc/localtime:ro
+
+    environment:
+      TZ: Europe/Oslo
+
+    # FarmHub runs on the WSL host, not in this container, so 127.0.0.1 here is the
+    # container's own loopback and will not reach it. This is what makes
+    # http://host.docker.internal:8099 work as the FarmHub URL.
+    #
+    # The other half is on the FarmHub side: it must bind to something the container
+    # can reach, which config/farmhub.dev.toml does and production does not.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

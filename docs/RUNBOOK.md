@@ -9,6 +9,145 @@ Stub. Sections are filled in as the milestones that need them land.
   config and prints the effective safety settings first.
 - `dry_run` is ON unless something turns it off. When it is off, startup logs a warning.
 
+## vLLM: starting and stopping (M1)
+
+The inference backend runs as a container defined in `deploy/vllm/compose.yaml`. That
+file is identical on the dev PC and on hub; only who starts it differs.
+
+First time:
+
+```sh
+cp deploy/vllm/env.example deploy/vllm/.env   # .env is gitignored
+$EDITOR deploy/vllm/.env                      # model, revision, memory, kv-cache dtype
+./deploy/vllm/vllm.sh config                  # shows the exact command that will run
+```
+
+Day to day on the dev PC:
+
+```sh
+./deploy/vllm/vllm.sh up        # background; does not wait for the model to load
+./deploy/vllm/vllm.sh wait      # blocks until /health answers (cold load takes minutes)
+./deploy/vllm/vllm.sh status    # container state plus GPU memory in use
+./deploy/vllm/vllm.sh logs -f
+./deploy/vllm/vllm.sh down      # frees the VRAM
+```
+
+**Start and stop are manual on the dev PC, on purpose.** That machine is used for other
+things and a 30 GB model must not hold the GPU all day. Docker Desktop on WSL2 has no
+systemd socket activation and vLLM has no idle shutdown, so anything automatic would be
+a bespoke sidecar. `compose.yaml` sets `restart: "no"` so the container never returns on
+its own after a Docker Desktop restart.
+
+*Deferred option, not built:* an idle-stop sidecar that polls vLLM's `/metrics` for time
+since the last request and runs `down` after N minutes. Worth doing only if the manual
+cycle becomes annoying.
+
+On hub it is always on: `deploy/systemd/farmhub-vllm.service` runs the same compose file
+at boot. Install instructions are in the unit file.
+
+**FarmHub does not require vLLM to be running.** The `llm` module starts degraded when
+the backend is unreachable and the registry retries with backoff, so bringing vLLM up or
+down under a running FarmHub is safe — answers fail cleanly in the meantime.
+
+### Pinning a model revision
+
+SPEC §2 requires every profile to pin a commit sha. A tag is not a pin: one NVFP4 upload
+of Qwen3.6-35B-A3B was silently replaced on 2026-07-10 with weights that loop, and a tag
+would have followed it on the next pull.
+
+```sh
+./deploy/vllm/vllm.sh resolve nvidia/Qwen3.6-35B-A3B-NVFP4
+```
+
+Paste the result into `VLLM_REVISION`, and into the matching FarmHub profile. If a sha
+you already pinned has moved, find out what changed before following it.
+
+### Checkpoint cache and disk
+
+`HF_CACHE_DIR` must point inside the Linux filesystem (`~/.cache/huggingface`), never at
+`/mnt/c` or `/mnt/d` — the Windows file bridge is far too slow for a 20 GB checkpoint and
+vLLM mmaps the safetensors at load.
+
+Budget against `C:`, not against what `df` reports inside WSL: that figure is the virtual
+disk's ceiling, not free space. At 17–32 GB per checkpoint only a few candidates fit at
+once, so prune between evaluation runs. Deleting files does not shrink the WSL virtual
+disk by itself.
+
+### Ollama fallback
+
+`deploy/ollama/compose.yaml` runs Ollama instead, for when vLLM will not start on a given
+card or when developing against a small model. Switching is a config change only: point
+`llm.base_url` at `http://127.0.0.1:11434/v1`. No Python changes (SPEC §2).
+
+Neither vLLM nor Ollama has any authentication of its own, so both stay bound to
+loopback on every host. FarmHub is the only client, and it carries the bearer token of
+§3.6.
+
+## The Home Assistant integration (M1, Q1)
+
+`custom_components/farmhub/` is a conversation agent that forwards unmatched
+utterances to FarmHub. See its own README for what it sends and why the built-in
+integrations do not fit.
+
+### Development
+
+The real `ha` box does not exist yet, and when it does it must never be used for
+development — it runs heating and pumps. Use the throwaway container instead:
+
+```sh
+docker compose -f deploy/dev/ha-compose.yaml up -d
+# http://localhost:8123 -> create a throwaway account
+# Settings > Devices & Services > Add Integration > FarmHub
+#   URL:   http://host.docker.internal:8099
+#   Token: the value of FARMHUB_API__TOKEN
+# Settings > Voice assistants -> set the conversation agent to FarmHub
+docker compose -f deploy/dev/ha-compose.yaml down -v   # -v discards the config
+```
+
+The integration is mounted read-only from the working tree, so editing it and
+restarting the container is the whole edit loop.
+
+### Networking, both halves
+
+FarmHub runs on the WSL host; Home Assistant runs in a container. `127.0.0.1` inside
+the container is the container's own loopback and will not reach FarmHub.
+
+- **Container side:** `extra_hosts: host.docker.internal:host-gateway`, already in the
+  compose file. The integration's URL is `http://host.docker.internal:8099`.
+- **FarmHub side:** it must bind to something the container can reach.
+  `config/farmhub.dev.toml` sets `api.bind_host = "0.0.0.0"` for exactly this, and
+  startup logs `api_bind_not_loopback` every time, so the setting cannot travel to
+  `hub` unnoticed.
+
+```sh
+export FARMHUB_API__TOKEN="$(openssl rand -hex 32)"
+uv run farmhub --config config/farmhub.dev.toml serve
+```
+
+**If the container gets a refused connection**, it is almost always that FarmHub is
+still on loopback: check the startup log for `api_bind_host`. On `hub` the bind address
+is the LAN address and §3.6 requires it to be firewalled to the `ha` host —
+`host.docker.internal` is a development-only arrangement.
+
+### The Home Assistant version is pinned
+
+The conversation-agent API changes between Home Assistant releases. `ha-compose.yaml`
+pins the version the integration was written against; raise it deliberately and re-test
+the agent when you do.
+
+### The API token
+
+It has no safe default, so `farmhub serve` refuses to start without one (§3.6, §7):
+
+```sh
+export FARMHUB_API__TOKEN="$(openssl rand -hex 32)"     # or
+# api.token_file = "/run/secrets/farmhub-token"          # in farmhub.toml
+```
+
+Never in git, and never in a config file that is committed. `farmhub config check`
+reports only whether a token is set, never its value, and the same is true of the
+startup log.
+
 ## Home Assistant side (SPEC §3.4), filled in at M5
 
 FarmHub cannot verify these from Python. Check each by hand before enabling any T2 tool:

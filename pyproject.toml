@@ -6,10 +6,14 @@ readme = "README.md"
 authors = [{ name = "Henry Berven", email = "henber00@gmail.com" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "openai>=1.40",
     "pydantic>=2",
     "pydantic-settings>=2",
     "structlog>=24",
     "typer>=0.12",
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]
@@ -25,6 +29,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "respx>=0.21",
     "ruff>=0.5",
 ]
 
@@ -38,6 +43,10 @@ select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "BLE", "S", "SIM", "RUF", "T20
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S603"]  # asserts; subprocess of our own console script
+# The eval harness is an operator CLI run by hand on a machine with a GPU, never a
+# served code path: it shells out to docker and nvidia-smi (absolute paths would differ
+# between the dev PC and hub), and it reports by printing rather than by logging.
+"evals/**" = ["S607", "T20"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -48,13 +57,22 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # starlette's TestClient imports a deprecated anyio alias at module level. Someone
+    # else's deprecation, on an import we do not control; scoped as narrowly as the
+    # filter syntax allows so our own deprecations still fail the run.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
 
 [tool.importlinter]
 root_package = "farmhub"
+# Required so the "no module imports vllm" contract below can name a package that is
+# not part of farmhub.
+include_external_packages = true
 
-# Phased per docs/DECISIONS.md: core isolation now. The module-independence contract
-# is added once two modules exist, the vLLM-import ban once modules/llm exists.
+# Phased per docs/DECISIONS.md: core isolation from M0; the vLLM-import ban now that
+# modules/llm exists. The module-independence contract is added once two modules do.
 [[tool.importlinter.contracts]]
 name = "core does not import the rest of farmhub"
 type = "forbidden"
@@ -66,3 +84,14 @@ forbidden_modules = [
     "farmhub.modules",
     "farmhub.storage",
 ]
+
+# SPEC §2: "Do not import vLLM anywhere outside modules/llm/." In practice vLLM is a
+# container, not a library, so nothing imports it at all — tests/safety asserts that
+# directly. This contract is the structural half: even modules/llm must reach the
+# backend over the OpenAI-compatible protocol, so that switching to Ollama stays a
+# config change.
+[[tool.importlinter.contracts]]
+name = "no module imports vllm"
+type = "forbidden"
+source_modules = ["farmhub"]
+forbidden_modules = ["vllm"]

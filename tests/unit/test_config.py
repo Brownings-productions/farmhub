@@ -74,7 +74,21 @@ def test_effective_safety_settings_are_logged() -> None:
     settings = load_settings()
     with capture_logs() as logs:
         log_effective_safety_settings(settings, structlog.get_logger())
-    assert logs == [{"event": "effective_safety_settings", "log_level": "info", "dry_run": True}]
+    summary = next(e for e in logs if e["event"] == "effective_safety_settings")
+    assert summary["log_level"] == "info"
+    # Every safety-relevant setting reaches the log, not only dry_run (SPEC §7).
+    assert summary["dry_run"] is True
+    assert summary["api_bind_host"] == "127.0.0.1"
+    assert summary["api_token_configured"] is False
+    assert summary["llm_base_url"] == "http://127.0.0.1:8000/v1"
+
+
+def test_the_bearer_token_never_reaches_the_safety_summary() -> None:
+    """The summary is written to the log file and printed to a terminal."""
+    settings = load_settings(overrides={"api": {"token": "s3cret-do-not-log"}})
+    summary = settings.safety_summary()
+    assert summary["api_token_configured"] is True
+    assert "s3cret-do-not-log" not in repr(summary)
 
 
 def test_warning_when_dry_run_is_off() -> None:
@@ -102,3 +116,105 @@ def test_known_env_vars_are_accepted_in_any_case(monkeypatch: pytest.MonkeyPatch
     settings = load_settings()
     assert settings.dry_run is False
     assert settings.logging.level == "DEBUG"
+
+
+# --- model profiles (SPEC §2) ---------------------------------------------------------
+
+# A profile that satisfies every rule, so each test below can break exactly one thing.
+GOOD_PROFILE = """
+[llm]
+profile = "primary"
+
+[profiles.primary]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gb = 17.5
+kv_cache_gb = 8.0
+aux_reserve_gb = 5.0
+card_total_gb = 31.8
+measured_by = "evals/2026-09-20T12-00-00Z"
+"""
+
+
+def test_a_measured_profile_loads(tmp_path: Path) -> None:
+    settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
+    profile = settings.active_profile()
+    assert profile is not None
+    assert profile.repo_id == "nvidia/Qwen3.6-35B-A3B-NVFP4"
+    assert settings.safety_summary()["llm_profile"] == "primary"
+
+
+@pytest.mark.parametrize("revision", ["main", "v1.0", "1355db6", "z" * 40])
+def test_a_revision_that_is_not_a_commit_sha_fails_startup(tmp_path: Path, revision: str) -> None:
+    """SPEC §2: a tag is not a pin. An upstream tag was moved under a released model."""
+    toml = GOOD_PROFILE.replace("1355db6a052410cfd62085d94b58866fd0f2c3c5", revision)
+    with pytest.raises(ConfigError, match="commit sha"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_a_profile_without_measured_by_fails_startup(tmp_path: Path) -> None:
+    """Budget numbers come from an evals run, never from hand (SPEC §2)."""
+    toml = "\n".join(
+        line for line in GOOD_PROFILE.splitlines() if not line.startswith("measured_by")
+    )
+    with pytest.raises(ConfigError, match="measured_by"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_a_budget_larger_than_the_card_fails_startup(tmp_path: Path) -> None:
+    toml = GOOD_PROFILE.replace("weights_gb = 17.5", "weights_gb = 26.0")
+    with pytest.raises(ConfigError, match="exceed"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_utilization_that_starves_the_auxiliary_models_fails_startup(tmp_path: Path) -> None:
+    """vLLM must leave aux_reserve_gb free for Whisper, BGE-M3 and the reranker."""
+    toml = GOOD_PROFILE.replace("gpu_memory_utilization = 0.82", "gpu_memory_utilization = 0.95")
+    with pytest.raises(ConfigError, match="aux_reserve_gb"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_selecting_an_undefined_profile_fails_startup(tmp_path: Path) -> None:
+    toml = GOOD_PROFILE.replace('profile = "primary"', 'profile = "does-not-exist"')
+    with pytest.raises(ConfigError, match="does-not-exist"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_an_unknown_profile_key_fails_startup(tmp_path: Path) -> None:
+    toml = GOOD_PROFILE + "looks_fine = true\n"
+    with pytest.raises(ConfigError):
+        load_settings(write_toml(tmp_path, toml))
+
+
+# --- api token (SPEC §3.6) ------------------------------------------------------------
+
+
+def test_token_is_read_from_a_file_so_it_need_not_be_in_the_toml(tmp_path: Path) -> None:
+    secret = tmp_path / "token"
+    secret.write_text("  hunter2\n")
+    settings = load_settings(overrides={"api": {"token_file": str(secret)}})
+    assert settings.resolve_api_token() == "hunter2"
+
+
+def test_an_empty_token_file_is_an_error(tmp_path: Path) -> None:
+    secret = tmp_path / "token"
+    secret.write_text("\n")
+    settings = load_settings(overrides={"api": {"token_file": str(secret)}})
+    with pytest.raises(ConfigError, match="empty"):
+        settings.resolve_api_token()
+
+
+def test_setting_both_token_and_token_file_fails_startup(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="not both"):
+        load_settings(overrides={"api": {"token": "x", "token_file": str(tmp_path / "t")}})
+
+
+def test_a_non_loopback_bind_address_is_warned_about() -> None:
+    """Allowed, but never silent: §3.6 requires it to be firewalled to the ha host."""
+    settings = load_settings(overrides={"api": {"bind_host": "0.0.0.0"}})  # noqa: S104
+    events = [event for event, _ in settings.safety_warnings()]
+    assert "api_bind_not_loopback" in events
