@@ -2,9 +2,10 @@
 
 Which model FarmHub serves, and the measurements behind that choice.
 
-**Status: the harness is built; no run has been recorded yet.** Results go below as
-they are produced. The chosen profile is recorded here, in `docs/DECISIONS.md` and in
-`config/farmhub.example.toml`.
+**Status: 1 of 6 runs recorded (2026-09-22).** Candidate A loads and serves on the
+dev PC's RTX 5090. No profile is chosen yet: the quality scores from that run are not
+usable as they stand, because the model answered in thinking mode and never reached an
+answer inside the token budget. See *Results* and *What the first run settled*.
 
 ## Why this exists
 
@@ -83,15 +84,128 @@ and figures are invented; nothing there should be believed outside this harness.
 
 ## Results
 
-_No run recorded yet._
+### Run `evals/2026-09-22T17-39-18Z` — candidate A, KV cache `auto`
 
-<!--
-Paste the markdown block printed by `uv run python -m evals.run` here, newest first.
-Keep every candidate, including the ones that would not load and the dtype that lost:
-a later re-evaluation needs to know what was already ruled out and why.
--->
+- vLLM image `vllm/vllm-openai:v0.29.0`; GPU RTX 5090, driver 596.36, 32607 MiB
+- `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a052410cfd62085d94b58866fd0f2c3c5` (pin verified current before download)
+- Text-only via `--language-model-only`; `--block-size 128`; `--gpu-memory-utilization 0.82`; `--max-model-len 32768`
+- 3 concurrent sessions assumed; 5.0 GB held back for Whisper, BGE-M3 and the reranker
+
+| candidate | loaded | kernel | weights GB | KV GB | KV tokens | ctx @3 | TTFT cold/warm | tools | grounding | classifier JSON |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `qwen36-35b-a3b-nvfp4` | yes | marlin-fallback | 19.55 | 4.9 | 207,842 | 69,280 | 0.396 / 0.082 | 0.75 | 0.33 † | 1.0 |
+
+† Not a usable quality score. See *Thinking mode* below.
+
+**Memory.** Weights 19.55 GiB, KV cache 4.9 GiB, peak activation 1.08 GiB, CUDA graphs
+0.08 GiB. vLLM's own summary: 20.13 GiB consumed (weights + non-torch) of the 26.11 GiB
+that `0.82` utilization allows, leaving roughly 6.8 GiB of the card outside vLLM —
+comfortably above the 5.0 GB auxiliary reservation the single-GPU profile needs.
+Budget: 19.55 + 4.9 + 5.0 = 29.45 GB against a 31.8 GB card.
+
+**Context.** 207,842 KV tokens is 69,280 per session at 3 concurrent, well beyond the
+32,768 `max_model_len` this run configured. vLLM reports 6.34× concurrency at 32K, so
+context is not the binding constraint here — weights are.
+
+**Latency.** Cold TTFT 0.396 s; warm TTFT median 0.082 s (max 0.087 s); 3 concurrent
+0.100 s median. The cold-to-warm gap is prefix caching doing its job (§2). These are
+time to *first* token, which is not the same as time to a usable answer — see below.
+
+**Kernel: the Marlin fallback is real, not theoretical.** vLLM selected
+`MarlinNvFp4LinearKernel` for NVFP4 GEMM and the `MARLIN` NvFp4 MoE backend, passing
+over `FLASHINFER_TRTLLM`, `FLASHINFER_CUTLASS` and `VLLM_CUTLASS`, and warned: "Your
+GPU does not have native support for FP4 computation … Weight-only FP4 compression
+will be used leveraging the Marlin kernel." The checkpoint also mixes schemes — vLLM
+detected both `NVFP4` and `W4A16_NVFP4`, and some linear layers run FP8 through
+FlashInfer. So on sm_120 with v0.29.0, NVFP4 buys the memory and not the compute. The
+numbers above are Marlin numbers, and a later vLLM that dispatches a native FP4
+backend needs its own run rather than inheriting them.
+
+**Classifier.** 10/10 valid JSON, 9/10 correct. The one miss is the deliberately
+ambiguous utterance, classified `action` where the case expects `question`. §4 routes
+an invalid or failed classification to `question`, but a *confidently wrong* `action`
+is not caught by that default — which is an argument for the deterministic pre-pass at
+M6 (Q2), not against this model.
+
+**Tools.** 6/8, with zero schema violations, zero invented tools, zero unparseable
+arguments and zero false positives. Both failures are the same shape: no tool call at
+all where one was expected (the Norwegian watering request, and the request whose
+duration exceeds the parameter maximum). Nothing dangerous happened — it under-acted
+rather than over-acted, and it correctly declined to call anything for the barn
+heating (T3, not exposed), the out-of-enum area and the plain question. Both misses
+are plausibly the same token-budget problem as the grounding cases.
+
+**Thinking mode, and why the grounding score is not usable.** Every grounding answer
+begins "Here's a thinking process:" and the stored answers are ~300 characters, cut
+off at `max_completion_tokens = 256` while still reasoning. The model never reached
+its answer, so the scorer saw the context figures quoted inside the reasoning and
+counted them as wrong figures. 0.33 therefore measures the harness's budget, not the
+model's part-number fidelity.
+
+This is the open question from the M1 plan — *does Qwen3.6's thinking mode hurt
+latency?* — and the answer is worse than "it hurts TTFT". TTFT is excellent (0.082 s
+warm) because the first token arrives promptly; it is just a token of reasoning. What
+matters for voice is time to a *usable* answer, which this run did not reach at all.
+
+The checkpoint's chat template accepts `enable_thinking`, so the fix is a request
+parameter (`chat_template_kwargs: {"enable_thinking": false}`), not a different model.
+Until the harness sends it and the run is repeated, candidate A has **no valid quality
+score**, and the comparison against candidates B and the fallback would be meaningless.
+
+**Vision tower.** Recorded as unknown, honestly: no log line states whether it was
+skipped. Reading the v0.29.0 source, `--language-model-only` zeroes every modality
+limit and `_mark_tower_model` then skips loading a tower whose modalities are all zero,
+so the weights should not be loaded. The circumstantial numbers agree — the
+checkpoint's vision tensors are 0.83 GiB of 21.80 GiB, and vLLM loaded 19.55 GiB — but
+Marlin repacking changes sizes too, so this is consistent rather than conclusive. To
+settle it, load once with and once without the flag and compare the reported weights.
+
+### Emitted profile (not yet adopted)
+
+```toml
+[profiles.qwen36_35b_a3b_nvfp4]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gb = 19.55
+kv_cache_gb = 4.9
+aux_reserve_gb = 5.0
+card_total_gb = 31.8
+measured_by = "evals/2026-09-22T17-39-18Z"
+```
+
+The memory numbers are sound and this block is what the harness emitted. It is not
+adopted yet, because adopting a profile means accepting its quality, and the quality
+half of this run has to be repeated.
+
+## What the first run settled
+
+Beyond the numbers, three things that were assumptions before:
+
+1. **The NVFP4 stack loads and serves on this card** — the point of running candidate A
+   first — but through Marlin W4A16, not native FP4.
+2. **vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`**, or v0.29.0 fails at device
+   init with "UVA is not available". Dev PC only; hub is native Linux (`docs/DECISIONS.md`).
+3. **Two harness bugs that a dry run could not have caught**: the text-only flag was
+   passed as JSON that lost its quotes through compose, and v0.29.0 reworded both
+   memory log lines, so the profile could not be emitted. Both are fixed and covered
+   by tests built from the real log.
+
+### Operational notes for the next run
+
+- The checkpoint took 27 minutes to download (21.8 GiB) and the rate swung between
+  ~90 MB and ~3 GB per minute. Weight load is 42 s, engine init 116 s, so a repeat run
+  on a warm cache is ~3 minutes to serving.
+- The vLLM image is 30.5 GB unpacked, which is the larger disk cost on `C:`.
+- vLLM holds ~20 GB of VRAM from engine start, before any weights are loaded.
 
 ## Decision
 
-_Pending the first run._ Record the chosen profile here and in `docs/DECISIONS.md`,
-and paste its emitted block into `config/farmhub.example.toml`.
+_Pending._ Candidate A is a plausible profile on memory and latency, but no model is
+chosen until the quality scores are re-measured with thinking disabled, and until the
+remaining five runs (candidate A at `fp8`, candidates B and the fallback at both
+dtypes) say what they cost. The chosen profile then goes here, in `docs/DECISIONS.md`
+and in `config/farmhub.example.toml`.

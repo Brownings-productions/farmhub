@@ -27,12 +27,23 @@ ENV_FILE = VLLM_DIR / ".env"
 
 # Tolerant on purpose: vLLM rewords these between releases. A miss leaves the value
 # None and the raw log is kept, so a missing number is visible rather than zero.
-WEIGHTS = re.compile(r"model weights take\s+([\d.]+)\s*GiB", re.I)
-KV_CACHE_GIB = re.compile(r"KV cache (?:size|takes)\D+([\d.]+)\s*GiB", re.I)
+# Two wordings each, because v0.29.0 renamed both lines. Older releases say "model
+# weights take X GiB"; v0.29.0 says "Model loading took X GiB memory". Likewise the KV
+# cache: "Available KV cache memory: X GiB" is the v0.29.0 spelling.
+WEIGHTS = re.compile(
+    r"model weights take\s+([\d.]+)\s*GiB|model loading took\s+([\d.]+)\s*GiB", re.I
+)
+KV_CACHE_GIB = re.compile(
+    r"KV cache (?:size|takes)\D+?([\d.]+)\s*GiB|available KV cache memory:\s*([\d.]+)\s*GiB",
+    re.I,
+)
 KV_CACHE_TOKENS = re.compile(r"GPU KV cache size:\s*([\d,]+)\s*tokens", re.I)
 MAX_CONCURRENCY = re.compile(r"Maximum concurrency for\s+([\d,]+)\s+tokens.*?([\d.]+)x", re.I)
 
 # Which kernel actually ran. The Marlin line is the one to watch for.
+# A line that names loading the vision tower's weights, not merely mentioning vision.
+VISION_WEIGHTS = re.compile(r"(loading|loaded).{0,40}(visual\.|vision tower)", re.I)
+
 KERNEL_HINTS = (
     "marlin",
     "modelopt",
@@ -162,15 +173,14 @@ def parse_startup(log: str, log_path: Path) -> Startup:
     startup = Startup(log_path=str(log_path))
 
     if match := WEIGHTS.search(log):
-        startup.weights_gb = float(match.group(1))
+        startup.weights_gb = float(match.group(1) or match.group(2))
     if match := KV_CACHE_GIB.search(log):
-        startup.kv_cache_gb = float(match.group(1))
+        startup.kv_cache_gb = float(match.group(1) or match.group(2))
     if match := KV_CACHE_TOKENS.search(log):
         startup.kv_cache_tokens = int(match.group(1).replace(",", ""))
     if match := MAX_CONCURRENCY.search(log):
         startup.max_concurrency = float(match.group(2))
 
-    lowered = log.lower()
     startup.kernel_lines = sorted(
         {
             line.strip()
@@ -178,7 +188,14 @@ def parse_startup(log: str, log_path: Path) -> Startup:
             if any(hint in line.lower() for hint in KERNEL_HINTS)
         }
     )[:40]
-    if "vision" in lowered or "visual" in lowered or "mm_encoder" in lowered:
+    # Deliberately narrow. The first version of this looked for "vision" anywhere in
+    # the log and so reported the tower loaded for every run: vLLM names the encoder's
+    # attention backend while it is picking backends, whether or not the tower is then
+    # built. Only a line that names loading visual *weights* counts, and anything else
+    # leaves this None — unknown rather than a confident wrong answer. To settle it
+    # properly, load once with and once without --language-model-only and compare the
+    # reported weights size.
+    if VISION_WEIGHTS.search(log):
         startup.vision_tower_loaded = True
     return startup
 

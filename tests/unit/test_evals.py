@@ -222,3 +222,54 @@ def test_the_tool_schemas_follow_the_spec_7_rules() -> None:
                 assert "minimum" in spec and "maximum" in spec, name
             if spec["type"] == "string":
                 assert "enum" in spec or "maxLength" in spec, name
+
+
+# --- the v0.29.0 startup log (real lines, from evals/results/logs) ---------------------
+
+V029_LOG = """
+INFO 09-22 18:07:48 [default_loader.py:430] Loading weights took 42.17 seconds
+WARNING 09-22 18:07:48 [marlin.py:34] Your GPU does not have native support for FP4 \
+computation but FP4 quantization is being used. Weight-only FP4 compression will be \
+used leveraging the Marlin kernel.
+INFO 09-22 18:07:56 [model_runner.py:404] Model loading took 19.55 GiB memory and \
+1679.837327 seconds
+INFO 09-22 18:09:43 [gpu_worker.py:625] Available KV cache memory: 4.9 GiB
+INFO 09-22 18:09:43 [kv_cache_utils.py:2032] GPU KV cache size: 207,842 tokens, \
+Maximum concurrency for 32,768 tokens per request: 6.34x
+"""
+
+
+def test_the_parser_reads_the_v029_memory_lines(tmp_path: Path) -> None:
+    """vLLM reworded both lines in v0.29.0, and the old patterns silently missed them.
+
+    A miss is not harmless: the run still scores, but the profile cannot be emitted,
+    so the numbers SPEC §2 requires to be measured go missing.
+    """
+    startup = parse_startup(V029_LOG, tmp_path / "log.txt")
+    assert startup.weights_gb == 19.55
+    assert startup.kv_cache_gb == 4.9
+    assert startup.kv_cache_tokens == 207842
+    assert startup.max_concurrency == 6.34
+
+
+def test_the_older_wording_still_parses(tmp_path: Path) -> None:
+    older = (
+        "INFO model weights take 16.20GiB; non_torch_memory takes 0.5GiB\n"
+        "INFO GPU KV cache size: 100,000 tokens\n"
+    )
+    startup = parse_startup(older, tmp_path / "log.txt")
+    assert startup.weights_gb == 16.20
+    assert startup.kv_cache_tokens == 100000
+
+
+def test_vision_tower_is_not_reported_loaded_from_backend_chatter(tmp_path: Path) -> None:
+    """vLLM names the encoder's attention backend even when the tower is skipped.
+
+    Treating that as "the vision tower loaded" made every text-only run look like it
+    had paid for the tower, which is exactly the memory SPEC §2 wants excluded.
+    """
+    log = (
+        "INFO [cuda.py:551] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention\n"
+        "INFO [mm_encoder_attention.py:372] Using FLASH_ATTN for MMEncoderAttention.\n"
+    )
+    assert parse_startup(log, tmp_path / "log.txt").vision_tower_loaded is None
