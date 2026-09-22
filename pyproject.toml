@@ -25,6 +25,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13",
     "import-linter>=2",
     "mypy>=1.10",
     "pytest>=8",
@@ -95,3 +96,13 @@ name = "no module imports vllm"
 type = "forbidden"
 source_modules = ["farmhub"]
 forbidden_modules = ["vllm"]
+
+# httpx2 is the openai SDK's HTTP library. It is a dev dependency for the mock
+# transport in tests/unit/test_llm.py only (docs/DECISIONS.md); src/ reaches HTTP
+# through the SDK's re-exports and through httpx, never through httpx2 directly.
+[[tool.importlinter.contracts]]
+name = "src does not import httpx2"
+type = "forbidden"
+source_modules = ["farmhub"]
+forbidden_modules = ["httpx2"]
+allow_indirect_imports = true

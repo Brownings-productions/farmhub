@@ -221,6 +221,9 @@ That parameter is typed loosely (`Any`) on purpose, so the transitive HTTP libra
 
 **Worth raising:** if the loose typing or the test-only import is not acceptable, the alternative is writing the client on plain `httpx` instead of the SDK. That is more code but removes the mismatch entirely. **In force (M1).**
 
+### 2026-09-22: `httpx2` is a declared dev dependency, tests only
+Reviewed and kept: the mock-transport approach above stays, and the plain-`httpx` rewrite is not done. `httpx2` is now declared in the dev dependency group rather than arriving only because `openai` pulls it in, since the tests import it by name and a transitive dependency can change under them. It is used only in `tests/`: a `lint-imports` contract forbids `farmhub` from importing it (indirect imports through the SDK are allowed, direct ones are not). **In force (M1).**
+
 ### 2026-09-20: the vLLM and SDK import boundaries are enforced twice
 SPEC §2 says not to import vLLM outside `modules/llm/`. In practice nothing imports it at all, because it is a container rather than a library, and that is what keeps "switching to Ollama is a config change" true.
 

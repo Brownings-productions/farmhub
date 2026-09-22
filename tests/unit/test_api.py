@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 from support import StubLLM
 from support_api import auth, make_client, make_settings
 
@@ -223,3 +224,28 @@ def test_latest_user_text_handles_structured_content() -> None:
 def test_latest_user_text_is_none_when_there_is_nothing_to_answer() -> None:
     request = ChatCompletionRequest(messages=[{"role": "user", "content": "   "}])
     assert latest_user_text(request.messages) is None
+
+
+def test_an_unexpected_backend_error_gives_503_and_leaks_nothing(tmp_path: Path) -> None:
+    """Regression: an unclassified exception used to reach HA as an opaque 500.
+
+    It must become a 503 with a fixed message, while the traceback goes to the log
+    where it can be fixed. Nothing from the exception may appear in the response body:
+    internals such as URLs or paths are for the operator, not for a satellite.
+    """
+    internals = "internal detail /srv/vllm http://10.0.0.5:8000"
+
+    class Exploding(StubLLM):
+        async def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError(internals)
+
+    client, _ = make_client(make_settings(tmp_path), Exploding())
+    with client, capture_logs() as logs:
+        response = client.post("/v1/chat/completions", json=body(), headers=auth())
+    assert response.status_code == 503
+    assert internals not in response.text
+    assert "RuntimeError" not in response.text
+    raised = [e for e in logs if e["event"] == "llm_call_raised"]
+    assert len(raised) == 1
+    assert raised[0]["log_level"] == "error"
+    assert raised[0]["exc_info"] is True

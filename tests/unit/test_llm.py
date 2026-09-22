@@ -5,6 +5,7 @@ no GPU (SPEC §9). The transport belongs to the HTTP library the openai SDK happ
 use, which is why it is reached for here and never in ``src/``.
 """
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,7 @@ from support import make_app_context
 from farmhub.core.config import LlmSettings, Settings
 from farmhub.core.errors import DependencyUnavailable, LLMError
 from farmhub.core.protocols import ChatMessage, HealthState, Tier, ToolSpec
+from farmhub.core.registry import ModuleRegistry, ModuleStatus
 from farmhub.modules.llm import LlmModule, OpenAICompatBackend
 from farmhub.modules.llm.client import tool_schema
 
@@ -309,3 +311,46 @@ async def test_module_shutdown_is_idempotent() -> None:
     module = LlmModule(make_backend(lambda r: httpx2.Response(200, json=models_body(MODEL))))
     await module.shutdown()
     await module.shutdown()
+
+
+async def test_the_shared_client_still_works_after_a_degraded_start() -> None:
+    """Regression: a degraded start used to close the shared client for good.
+
+    The registry calls ``shutdown`` after a degraded start and before each retry. When
+    the module closed the backend there, every later request failed with "the client
+    has been closed", even after vLLM came back. This runs the real registry against
+    the real client: vLLM is down at startup, comes back before the first retry, and a
+    completion through the same shared backend must then succeed.
+    """
+    backend_up = False
+
+    def vllm(request: httpx2.Request) -> httpx2.Response:
+        if not backend_up:
+            raise httpx2.ConnectError("connection refused", request=request)
+        if request.url.path.endswith("/models"):
+            return httpx2.Response(200, json=models_body(MODEL))
+        return httpx2.Response(200, json=completion_body("tilbake"))
+
+    async def vllm_comes_back(_delay: float) -> None:
+        nonlocal backend_up
+        backend_up = True
+
+    backend = make_backend(vllm)
+    ctx = make_app_context(llm=backend)
+    registry = ModuleRegistry([LlmModule(backend)], sleep=vllm_comes_back)
+    recovered = asyncio.Event()
+
+    async def on_recovered(_event: object) -> None:
+        recovered.set()
+
+    ctx.events.subscribe("module.recovered", on_recovered)
+    await registry.startup(ctx)
+    assert registry.status()["llm"] is ModuleStatus.DEGRADED
+
+    await asyncio.wait_for(recovered.wait(), timeout=2)
+    assert registry.status()["llm"] is ModuleStatus.RUNNING
+    response = await ctx.llm.chat([ChatMessage(role="user", content="hei")])
+    assert response.content == "tilbake"
+
+    await registry.shutdown()
+    await backend.aclose()
