@@ -73,6 +73,12 @@ disk's ceiling, not free space. At 17–32 GB per checkpoint only a few candidat
 once, so prune between evaluation runs. Deleting files does not shrink the WSL virtual
 disk by itself.
 
+### WSL2: pinned memory
+
+On the dev PC, vLLM refuses to start with "UVA is not available" unless
+`VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set in `.env` (it is in `env.example`). vLLM turns
+pinned memory off under WSL by default. On hub, leave it at `0`: native Linux ignores it.
+
 ### Ollama fallback
 
 `deploy/ollama/compose.yaml` runs Ollama instead, for when vLLM will not start on a given
