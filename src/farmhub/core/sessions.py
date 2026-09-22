@@ -71,6 +71,21 @@ class SessionStore:
                 self._sessions[refreshed.id] = refreshed
                 return refreshed
 
+            # Home Assistant hands FarmHub's own session id back as the conversation
+            # id on the next turn (see custom_components/farmhub), so a session id is
+            # a legitimate lookup key too. Same binding rule: it resolves only for the
+            # identity it was minted for, so it cannot be used to claim another one.
+            by_session = self._sessions.get(conversation_id)
+            if by_session is not None and by_session.satellite == satellite:
+                refreshed = Session(
+                    id=by_session.id,
+                    satellite=by_session.satellite,
+                    created_at=by_session.created_at,
+                    last_seen_at=moment,
+                )
+                self._sessions[refreshed.id] = refreshed
+                return refreshed
+
         minted = Session(
             id=f"s-{uuid.uuid4().hex}",
             satellite=satellite,

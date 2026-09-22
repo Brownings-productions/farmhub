@@ -249,3 +249,47 @@ def test_an_unexpected_backend_error_gives_503_and_leaks_nothing(tmp_path: Path)
     assert len(raised) == 1
     assert raised[0]["log_level"] == "error"
     assert raised[0]["exc_info"] is True
+
+
+def test_the_returned_session_continues_the_conversation(tmp_path: Path) -> None:
+    """End to end over HTTP, the way the HA integration actually behaves.
+
+    It puts FarmHub's returned session id in the conversation id header of the next
+    request, so the second turn must land in the same session as the first.
+    """
+    client, _ = make_client(make_settings(tmp_path))
+    with client:
+        first = client.post(
+            "/v1/chat/completions",
+            json=body(),
+            headers=auth(**{"X-FarmHub-Device-Id": "dev-kitchen"}),
+        )
+        session = first.json()["farmhub"]["session"]
+        second = client.post(
+            "/v1/chat/completions",
+            json=body("og hydraulikkolje?"),
+            headers=auth(
+                **{"X-FarmHub-Device-Id": "dev-kitchen", "X-FarmHub-Conversation-Id": session}
+            ),
+        )
+    assert second.json()["farmhub"]["session"] == session
+
+
+def test_a_non_ascii_token_is_rejected_as_unauthorized(tmp_path: Path) -> None:
+    """A malformed token is a 401, never a 500.
+
+    ``compare_digest`` raises TypeError on a non-ASCII str, so comparing the raw
+    strings turned a bad token into a crash — and an error that says "server fault"
+    about something the caller got wrong.
+    """
+    client, _ = make_client(make_settings(tmp_path))
+    # Sent as latin-1 bytes, which is what a header can actually carry; starlette
+    # decodes it back to a str holding non-ASCII characters.
+    header = "Bearer nøkkel-som-ikke-er-ascii".encode("latin-1")
+    with client:
+        response = client.post(
+            "/v1/chat/completions",
+            json=body(),
+            headers={b"Authorization": header},
+        )
+    assert response.status_code == 401
