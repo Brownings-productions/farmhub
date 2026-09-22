@@ -18,4 +18,22 @@ uv run mypy --strict src/farmhub/core
 uv run lint-imports
 ```
 
-Dry-run is ON by default. Current milestone: M0 (scaffold).
+Dry-run is ON by default. Current milestone: **M1** (llm + FastAPI + `/v1/chat/completions`).
+
+## Running it
+
+```sh
+export FARMHUB_API__TOKEN="$(openssl rand -hex 32)"   # required; no safe default
+uv run farmhub config check                           # effective safety settings
+uv run farmhub serve                                  # the HA conversation endpoint
+```
+
+The LLM backend does not have to be running: the `llm` module starts degraded and is
+retried, so the server comes up either way and `/health` says so.
+
+| | |
+|---|---|
+| vLLM, start and stop | `deploy/vllm/` — see [docs/RUNBOOK.md](docs/RUNBOOK.md) |
+| Home Assistant integration | [custom_components/farmhub/](custom_components/farmhub/) |
+| Throwaway HA for development | `deploy/dev/ha-compose.yaml` |
+| Model evaluation (needs the GPU) | `uv run python -m evals.run --list`, [docs/MODEL_EVAL.md](docs/MODEL_EVAL.md) |

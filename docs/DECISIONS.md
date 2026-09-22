@@ -166,6 +166,22 @@ pydantic-settings silently ignores unknown top-level environment variables, so `
 
 ## Made while implementing M1
 
+### 2026-09-20: Q1 settled — a custom HA integration passes identity in headers
+A standard OpenAI chat-completions request has no field for the Home Assistant `device_id`, and §3.6 forbids taking satellite identity from message content. The built-in "OpenAI Conversation" integration therefore cannot carry it, and it also builds its own prompt and tool list, which collides with FarmHub building its own. Overloading the `user` field was rejected: FarmHub owns both ends, so a purpose-named header is clearer than a field that means something else.
+
+`custom_components/farmhub/` is a conversation agent kept in this repo. It posts to `/v1/chat/completions` with `Authorization: Bearer …`, `X-FarmHub-Device-Id` and `X-FarmHub-Conversation-Id`, and no tools or system prompt.
+
+**The trust boundary, stated plainly:** the bearer token authenticates Home Assistant and is the only thing FarmHub verifies. `device_id` is an authorization *input* that HA vouches for, not an authentication — anyone holding the token can assert any `device_id`. So the token is the real security boundary, the satellite registry bounds the blast radius, and §3.6's firewall to the `ha` host is load-bearing rather than belt-and-braces.
+
+Consequences implemented at M1:
+- The token has no safe default, so `farmhub serve` refuses to start without one. `config check` and the startup log report only whether one is set, never its value.
+- `api.bind_host` defaults to loopback; a non-loopback value is allowed but logged as a warning on every startup, so the dev arrangement cannot travel to `hub` unnoticed.
+- Sessions are minted server-side and keyed on `(satellite, conversation_id)`, so a conversation id alone can never reach another satellite's session.
+- An unregistered `device_id` is served T0-only with a warning rather than refused: §3.6 asks for limited, not mute, and refusing would make a mis-registered satellite silent.
+- A minimal satellite registry lands now rather than at M9, so the fail-closed path has something to fail closed *against*. M9 extends it with input mode; `confirmers` are per area (§3.3).
+
+Removed from SPEC §14. **In force (M1).**
+
 ### 2026-09-20: the eval harness emits the profile, so nobody types the numbers
 `evals/` lives outside `tests/` because it needs a real GPU and SPEC §9 forbids a test that does. It is run by hand; CI never touches it.
 

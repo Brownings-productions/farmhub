@@ -20,6 +20,7 @@ Folds in the hardware change of 2026-09-20 (see `docs/DECISIONS.md`). **No §3 r
 | 6 | §2 Models | **New rule:** `kv_cache_dtype` is a declared profile field, evaluated at M1 rather than assumed. |
 | 7 | §2 Inference backend | After the card swap the dev PC uses vLLM on `hub` over the LAN, with a small-model profile on the 5080 as the offline fallback. |
 | 8 | §11 | M1 notes the evaluation runs on the dev PC's 5090 before the card moves. M2's row says the JSONL sink is implemented, not merely decided (Q8). The "no dedicated hardware before M9" note is qualified. |
+| 9 | §14 | **Q1 resolved** (M1): a custom Home Assistant integration passes `device_id` and `conversation_id` as headers alongside the bearer token. Removed from the open list. |
 
 ---
 
@@ -222,7 +223,7 @@ This blocks prompt injection from a scanned PDF or a web page into the actuation
 
 Satellite identity comes from the Wyoming connection or the HA `device_id`, authenticated at the endpoint, and the gateway derives the allowed tool set from it. The model never supplies its own location, area or scope as a tool argument. The workshop satellite cannot actuate greenhouse valves.
 
-Sessions are minted server-side and bound to the authenticated satellite identity; HA's `conversation_id` is a lookup key only, never trusted alone. `/v1/chat/completions` and the confirm endpoint require a shared service-to-service bearer token, listen on a configurable bind address and are firewalled to the `ha` host. FarmHub ignores client-supplied `tools` and system prompts and builds its own. Transport details settle with Q1 (M1).
+Sessions are minted server-side and bound to the authenticated satellite identity; HA's `conversation_id` is a lookup key only, never trusted alone. `/v1/chat/completions` and the confirm endpoint require a shared service-to-service bearer token, listen on a configurable bind address and are firewalled to the `ha` host. FarmHub ignores client-supplied `tools` and system prompts and builds its own. Transport: a custom Home Assistant integration (`custom_components/farmhub/`) sends the bearer token, `device_id` and `conversation_id` as headers (Q1, settled at M1).
 
 Each satellite has a home area, a scope (the set of areas it may act on) and a tier ceiling that may not exceed T2. The effective tools are those with tier ≤ the satellite's ceiling AND `allowed_scopes` intersecting its scope. `"*"` is rejected in `allowed_scopes` for T2 tools. `confirmers` are configured per area.
 
@@ -648,7 +649,8 @@ Do not build: a custom web UI (Home Assistant is the UI), user accounts, or auth
 
 Known unresolved decisions. Raise each one at the milestone named, propose options, and wait for an answer. Record the outcome in `docs/DECISIONS.md` and remove it from this list.
 
-- **Q1 (M1): How satellite identity reaches FarmHub.** The standard OpenAI chat-completions request has no field for the HA `device_id`. Decide which HA conversation integration calls FarmHub and how it passes identity (a header, the `user` field, or a small custom integration). Also settle here: the bearer token, server-minted sessions bound to the authenticated identity, and the bind address (§3.6). Until resolved, §3.6 fail-closed applies and every request is T0-only.
+Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Home Assistant integration (`custom_components/farmhub/`) that forwards the utterance with the bearer token, `device_id` and `conversation_id` as headers. See `docs/DECISIONS.md`.
+
 - **Q2 (M6): Action-verb and alias list for the classifier pre-pass.** Proposed source: derived automatically from tool names and descriptions in `config/tools/`, plus a hand-maintained Norwegian and English verb list.
 - **Q3 (M6): Rate limits for T0 and T1.** Only T2 has a default. Propose values.
 - **Q4 (M12): Preview rendering.** How the three PNG previews are rendered inside the sandbox (OpenSCAD's renderer, a headless mesh renderer, or CadQuery SVG export converted to PNG). Must not add a network-capable dependency to the sandbox.
