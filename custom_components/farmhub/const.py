@@ -11,7 +11,11 @@ CONF_TOKEN = "token"  # noqa: S105 - a config-entry key name, not a credential
 HEADER_DEVICE_ID = "X-FarmHub-Device-Id"
 HEADER_CONVERSATION_ID = "X-FarmHub-Conversation-Id"
 
-DEFAULT_URL = "http://homeassistant.local:8099"
+# Where FarmHub is, from inside Home Assistant. "homeassistant.local" would be the HA
+# box pointing at itself; the dev container reaches the WSL host through the gateway
+# alias in deploy/dev/ha-compose.yaml. On the real ha box this becomes hub's LAN
+# address, which is typed into the config flow (docs/RUNBOOK.md).
+DEFAULT_URL = "http://host.docker.internal:8099"
 CHAT_PATH = "/v1/chat/completions"
 HEALTH_PATH = "/healthz"
 

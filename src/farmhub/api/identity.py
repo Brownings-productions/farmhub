@@ -58,7 +58,9 @@ def require_bearer_token(expected: str) -> Callable[[str], Awaitable[None]]:
                 detail="a bearer token is required",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        if not secrets.compare_digest(presented, expected):
+        # Compared as bytes: compare_digest raises TypeError on a non-ASCII str, and
+        # a token that is merely malformed must be a 401, not a 500.
+        if not secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8")):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid token",

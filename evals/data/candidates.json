@@ -9,7 +9,7 @@
       "block_size": 128,
       "max_model_len": 32768,
       "gpu_memory_utilization": 0.82,
-      "extra_args": "--limit-mm-per-prompt {\"image\":0,\"video\":0}",
+      "extra_args": "--language-model-only",
       "text_only": true,
       "notes": "Candidate A. The only one with an official vLLM recipe validated on the RTX 5090. Multimodal, run text-only: FarmHub has no multimodal path and the vision tower's memory is memory the KV cache needs. Watch the kernel line: NVFP4 MoE on sm_120 may fall back to Marlin W4A16."
     },

@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO))
 
 from evals import report  # noqa: E402
 from evals.backend import parse_startup  # noqa: E402
+from evals.cases import common  # noqa: E402
 from evals.cases.tools import _violations  # noqa: E402
 from evals.profile import Candidate, Matrix, ProfileError  # noqa: E402
 
@@ -222,3 +223,138 @@ def test_the_tool_schemas_follow_the_spec_7_rules() -> None:
                 assert "minimum" in spec and "maximum" in spec, name
             if spec["type"] == "string":
                 assert "enum" in spec or "maxLength" in spec, name
+
+
+# --- the v0.29.0 startup log (real lines, from evals/results/logs) ---------------------
+
+V029_LOG = """
+INFO 09-22 18:07:48 [default_loader.py:430] Loading weights took 42.17 seconds
+WARNING 09-22 18:07:48 [marlin.py:34] Your GPU does not have native support for FP4 \
+computation but FP4 quantization is being used. Weight-only FP4 compression will be \
+used leveraging the Marlin kernel.
+INFO 09-22 18:07:56 [model_runner.py:404] Model loading took 19.55 GiB memory and \
+1679.837327 seconds
+INFO 09-22 18:09:43 [gpu_worker.py:625] Available KV cache memory: 4.9 GiB
+INFO 09-22 18:09:43 [kv_cache_utils.py:2032] GPU KV cache size: 207,842 tokens, \
+Maximum concurrency for 32,768 tokens per request: 6.34x
+"""
+
+
+def test_the_parser_reads_the_v029_memory_lines(tmp_path: Path) -> None:
+    """vLLM reworded both lines in v0.29.0, and the old patterns silently missed them.
+
+    A miss is not harmless: the run still scores, but the profile cannot be emitted,
+    so the numbers SPEC §2 requires to be measured go missing.
+    """
+    startup = parse_startup(V029_LOG, tmp_path / "log.txt")
+    assert startup.weights_gb == 19.55
+    assert startup.kv_cache_gb == 4.9
+    assert startup.kv_cache_tokens == 207842
+    assert startup.max_concurrency == 6.34
+
+
+def test_the_older_wording_still_parses(tmp_path: Path) -> None:
+    older = (
+        "INFO model weights take 16.20GiB; non_torch_memory takes 0.5GiB\n"
+        "INFO GPU KV cache size: 100,000 tokens\n"
+    )
+    startup = parse_startup(older, tmp_path / "log.txt")
+    assert startup.weights_gb == 16.20
+    assert startup.kv_cache_tokens == 100000
+
+
+def test_vision_tower_is_not_reported_loaded_from_backend_chatter(tmp_path: Path) -> None:
+    """vLLM names the encoder's attention backend even when the tower is skipped.
+
+    Treating that as "the vision tower loaded" made every text-only run look like it
+    had paid for the tower, which is exactly the memory SPEC §2 wants excluded.
+    """
+    log = (
+        "INFO [cuda.py:551] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention\n"
+        "INFO [mm_encoder_attention.py:372] Using FLASH_ATTN for MMEncoderAttention.\n"
+    )
+    assert parse_startup(log, tmp_path / "log.txt").vision_tower_loaded is None
+
+
+# --- thinking disabled, and the tripwire for when it is ignored ------------------------
+
+
+def test_every_case_asks_for_thinking_to_be_off() -> None:
+    """One run means one mode. A case that forgot the flag would not be comparable."""
+    body = common.payload("m", [{"role": "user", "content": "hei"}], max_completion_tokens=64)
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["max_completion_tokens"] == 64
+
+
+def test_extra_request_fields_survive() -> None:
+    body = common.payload(
+        "m", [{"role": "user", "content": "hei"}], max_completion_tokens=64, tools=[{"x": 1}]
+    )
+    assert body["tools"] == [{"x": 1}]
+
+
+def test_a_reply_that_reasons_anyway_is_caught() -> None:
+    """The parameter can be silently ignored by a backend or a chat template.
+
+    This is the exact opener from the 2026-09-22 run, when thinking was still on. If it
+    ever appears in a run that asked for thinking to be off, the quality scores from
+    that run mean nothing, so it must not go unnoticed.
+    """
+    message = {"content": "Here's a thinking process:\n\n1. **Analyze User Input:**"}
+    assert common.reasoning_in(message) is not None
+
+
+def test_reasoning_tags_and_the_reasoning_field_are_caught() -> None:
+    assert common.reasoning_in({"content": "<think>hmm</think>8,5 liter"}) is not None
+    assert common.reasoning_in({"reasoning_content": "hmm", "content": "8,5 liter"}) is not None
+
+
+def test_a_plain_answer_is_not_called_reasoning() -> None:
+    assert common.reasoning_in({"content": "Motoroljen er 8,5 liter med filter."}) is None
+    assert common.reasoning_in({"content": "SKF 6205-2RS."}) is None
+    assert common.reasoning_in({}) is None
+
+
+def test_truncation_is_read_from_the_finish_reason() -> None:
+    assert common.truncated({"finish_reason": "length"}) is True
+    assert common.truncated({"finish_reason": "stop"}) is False
+    assert common.truncated({}) is False
+
+
+def test_the_run_table_shows_reasoning_and_answer_time() -> None:
+    """A run that reasoned must say so in the same table as the scores it invalidates."""
+    result = {
+        "run_id": "r1",
+        "environment": {"vllm_image": "i", "gpu": "g", "driver": "d", "memory_total": "m"},
+        "aux_reserve_gb": 5.0,
+        "concurrent_sessions": 3,
+        "card_total_gb": 31.8,
+        "candidates": [
+            {
+                "candidate": {"name": "c"},
+                "loaded": True,
+                "kernel": "marlin-fallback",
+                "startup": {"weights_gb": 19.55, "kv_cache_gb": 4.9, "kv_cache_tokens": 207842},
+                "usable_context_at_concurrency": 69280,
+                "latency": {
+                    "cold_ttft_s": 0.4,
+                    "warm_ttft_s_median": 0.08,
+                    "reasoning_emitted": 2,
+                    "single": {"answer_s_median": 3.2, "gen_tokens_per_s_median": 61.0},
+                    "at_concurrency": {
+                        "answer_s_median": 5.1,
+                        "gen_tokens_per_s_median": 38.0,
+                    },
+                },
+                "tools": {"score": 0.88, "truncated": 1},
+                "grounding": {"score": 0.83},
+                "classifier": {"json_validity": 1.0},
+                "profile_toml": "",
+            }
+        ],
+    }
+    table = report.markdown(result)
+    assert "3.2 / 5.1" in table
+    assert "61.0 / 38.0" in table
+    assert report.total(result["candidates"][0], "reasoning_emitted") == 2
+    assert report.total(result["candidates"][0], "truncated") == 1

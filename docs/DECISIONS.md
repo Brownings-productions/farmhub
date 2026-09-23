@@ -221,6 +221,37 @@ That parameter is typed loosely (`Any`) on purpose, so the transitive HTTP libra
 
 **Worth raising:** if the loose typing or the test-only import is not acceptable, the alternative is writing the client on plain `httpx` instead of the SDK. That is more code but removes the mismatch entirely. **In force (M1).**
 
+### 2026-09-22: `httpx2` is a declared dev dependency, tests only
+Reviewed and kept: the mock-transport approach above stays, and the plain-`httpx` rewrite is not done. `httpx2` is now declared in the dev dependency group rather than arriving only because `openai` pulls it in, since the tests import it by name and a transitive dependency can change under them. It is used only in `tests/`: a `lint-imports` contract forbids `farmhub` from importing it (indirect imports through the SDK are allowed, direct ones are not). **In force (M1).**
+
+### 2026-09-22: Qwen3.6 runs text-only via `--language-model-only`
+The first eval run never started: `--limit-mm-per-prompt {"image":0,"video":0}` lost its JSON quotes on the way from `.env` through compose's whitespace-split command, and vLLM rejected the argument. `--language-model-only` replaces it. It is a plain boolean, so nothing needs quoting, and in v0.29.0 it sets every modality limit to zero. Read from the source: `MultiModalConfig.language_model_only` zeroes the limits, and `_mark_tower_model` skips loading any tower whose modalities are all zero. So the vision tower's weights are not loaded at all, rather than loaded and then left unused, which answers the open question in the M1 plan. **In force (M1).**
+
+### 2026-09-22: vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`
+The second run failed at device init with "UVA is not available". vLLM v0.29.0 turns pinned host memory off under WSL unless `VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set (upstream opt-in, gated on WSL2 kernel ≥ 4.19.121; the dev PC runs 6.18), and the V2 model runner's staging buffers cannot be allocated without it. `compose.yaml` passes the variable through, defaulting to `0`. `env.example` sets it to `1` for the dev PC, and hub leaves it at `0`, where vLLM ignores it on native Linux anyway. Since this is the dev PC only, it has no bearing on the numbers the eval carries over to hub. **In force (M1, dev PC only).**
+
+### 2026-09-23: storage and media split into `nas` and `tv`
+The `nas` row in SPEC §2 described a machine that no longer matches the plan. `nas` is now a new TrueNAS build — corpus, media and backups — starting on integrated graphics, with a transcoding GPU possible later. The existing TrueNAS box becomes `tv`, a TV and emulation machine that keeps its GTX 1060 until that card is upgraded, and is not part of the FarmHub system at all.
+
+Both keep the old rule: **never an AI target.** `hub` is the only machine that runs models. A spare GPU in a media box is a standing temptation, and spreading inference across machines would make `hub`'s measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
+
+Accepted as SPEC v1.4 (2026-09-23), amending §2 only — no §3 rule is touched. **Accepted (SPEC v1.4).**
+
+### 2026-09-23: thinking mode is switched off for serving, not just for the eval
+With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
+
+So this is a serving requirement, not an eval detail. FarmHub's own client has to send it, or the first real voice question produces a truncated ramble; §1 answers are read aloud. **To implement at M1:** `modules/llm` sends it, and which switch a model needs belongs in the profile beside `quantization` — a future model may spell it differently.
+
+The eval harness also records whether a reply reasoned anyway, and warns, because the parameter is silently ignorable by a backend or a chat template, and a run that ignored it would otherwise look like a clean result. **Recorded (M1); the client change is still to do.**
+
+### 2026-09-22: the NVFP4 Marlin fallback on sm_120 is confirmed, not theoretical
+SPEC §2 warned that NVFP4 on the RTX 5090 could fall back to Marlin W4A16. The first loading run of `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a` on `vllm/vllm-openai:v0.29.0` confirms it for both paths:
+
+- linear layers: `Using MarlinNvFp4LinearKernel for NVFP4 GEMM`;
+- MoE experts: `Using 'MARLIN' NvFp4 MoE backend out of potential backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', …, 'VLLM_CUTLASS', 'MARLIN', …]`.
+
+The checkpoint also mixes precisions: vLLM detects both `NVFP4` and `W4A16_NVFP4` quantization algorithms, and some linear layers run FP8 (`FlashInferFP8ScaledMMLinearKernel`). So on this card and this vLLM version, NVFP4 is a *memory format*: the 4-bit memory saving holds, but compute is W4A16 on Marlin, not native FP4. The numbers in `docs/MODEL_EVAL.md` are for the Marlin path, and a later vLLM that dispatches a native FP4 backend on sm_120 needs a fresh run rather than inheriting them. **Recorded (M1).**
+
 ### 2026-09-20: the vLLM and SDK import boundaries are enforced twice
 SPEC §2 says not to import vLLM outside `modules/llm/`. In practice nothing imports it at all, because it is a container rather than a library, and that is what keeps "switching to Ollama is a config change" true.
 

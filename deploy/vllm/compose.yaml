@@ -36,6 +36,10 @@ services:
       HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
       # Required by the vLLM recipe for NVFP4 on this card. Harmless otherwise.
       VLLM_HAS_FLASHINFER_CUBIN: "1"
+      # WSL2 only (the dev PC). vLLM disables pinned memory under WSL unless told
+      # otherwise, and v0.29's model runner cannot start without it ("UVA is not
+      # available"). Ignored on native Linux, so hub leaves it at 0.
+      VLLM_WSL2_ENABLE_PIN_MEMORY: ${VLLM_WSL2_ENABLE_PIN_MEMORY:-0}
 
     # vLLM needs a large shared-memory segment for its worker IPC.
     ipc: host

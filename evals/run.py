@@ -24,6 +24,7 @@ from typing import Any
 
 from evals import backend, report
 from evals.cases import classifier, grounding, latency, tools
+from evals.cases import common as cases_common
 from evals.profile import Candidate, Matrix, ProfileError
 
 DATA = Path(__file__).resolve().parent / "data" / "candidates.json"
@@ -165,6 +166,21 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
         backend.down()
 
     entry["aux_reserve_gb"] = AUX_RESERVE_GB
+    # Recorded so a run states its own request settings: thinking was asked to be off,
+    # and how many replies reasoned anyway despite that. A backend that ignores the
+    # parameter cannot then pass as a clean result (docs/MODEL_EVAL.md).
+    entry["chat_template_kwargs"] = dict(cases_common.CHAT_TEMPLATE_KWARGS)
+    entry["max_completion_tokens"] = {
+        name: (entry.get(name) or {}).get("max_completion_tokens")
+        for name in ("latency", "tools", "grounding", "classifier")
+    }
+    entry["reasoning_emitted"] = report.total(entry, "reasoning_emitted")
+    entry["truncated"] = report.total(entry, "truncated")
+    if entry["reasoning_emitted"]:
+        print(
+            f"  WARNING: {entry['reasoning_emitted']} repl(y|ies) still reasoned although "
+            "enable_thinking=false was sent. Quality scores from this run are not comparable."
+        )
     return entry
 
 

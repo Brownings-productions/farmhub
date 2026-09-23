@@ -23,7 +23,13 @@ from typing import Any
 
 import httpx
 
+from evals.cases import common
+
 DATA = Path(__file__).resolve().parent.parent / "data" / "tools.json"
+
+# A tool call is short, but the budget has to cover whatever precedes it. Recorded in
+# the run alongside how many replies were cut off.
+MAX_TOKENS = 512
 
 
 def _violations(name: str, args: dict[str, Any], schemas: dict[str, dict[str, Any]]) -> list[str]:
@@ -65,22 +71,25 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
     results: list[dict[str, Any]] = []
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
         for case in data["cases"]:
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": case["utterance"]}],
-                "tools": tools,
-                "max_completion_tokens": 256,
-            }
+            body = common.payload(
+                model,
+                [{"role": "user", "content": case["utterance"]}],
+                max_completion_tokens=MAX_TOKENS,
+                tools=tools,
+            )
             record: dict[str, Any] = {"id": case["id"], "utterance": case["utterance"]}
             try:
-                response = await client.post("/v1/chat/completions", json=payload)
+                response = await client.post("/v1/chat/completions", json=body)
                 response.raise_for_status()
-                message = response.json()["choices"][0]["message"]
+                choice = response.json()["choices"][0]
+                message = choice["message"]
             except Exception as exc:  # noqa: BLE001 - recorded as a failed case
                 record.update(ok=False, error=f"{type(exc).__name__}: {exc}")
                 results.append(record)
                 continue
 
+            record["truncated"] = common.truncated(choice)
+            record["reasoning"] = common.reasoning_in(message)
             calls = message.get("tool_calls") or []
             expected = case.get("expect_tool")
 
@@ -132,6 +141,9 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
 
     total = len(results)
     return {
+        "max_completion_tokens": MAX_TOKENS,
+        "truncated": sum(1 for r in results if r.get("truncated")),
+        "reasoning_emitted": sum(1 for r in results if r.get("reasoning")),
         "cases": total,
         "correct": sum(1 for r in results if r.get("ok")),
         "schema_violations": sum(1 for r in results if r.get("schema_violations")),
