@@ -2,10 +2,12 @@
 
 Which model FarmHub serves, and the measurements behind that choice.
 
-**Status: 1 of 6 runs recorded (2026-09-22).** Candidate A loads and serves on the
-dev PC's RTX 5090. No profile is chosen yet: the quality scores from that run are not
-usable as they stand, because the model answered in thinking mode and never reached an
-answer inside the token budget. See *Results* and *What the first run settled*.
+**Status: candidate A measured with valid quality scores (2026-09-23); 5 of 6 matrix
+runs still to do.** Candidate A loads and serves on the dev PC's RTX 5090, reproduces
+part numbers and torque figures perfectly with thinking disabled, and answers a spoken
+question in well under a second. No profile is adopted yet: the other five runs
+(candidate A at `fp8`, candidate B and the fallback at both dtypes) have not run, and
+one harness weakness remains open — see *Sampling is not pinned*.
 
 ## Why this exists
 
@@ -84,7 +86,87 @@ and figures are invented; nothing there should be believed outside this harness.
 
 ## Results
 
-### Run `evals/2026-09-22T17-39-18Z` — candidate A, KV cache `auto`
+### Run `evals/2026-09-23T16-13-25Z` — candidate A, KV cache `auto`, thinking disabled
+
+The repeat of the run below, with `chat_template_kwargs {"enable_thinking": false}` on
+every request and larger token budgets. **This is the run with usable quality scores.**
+
+| candidate | loaded | kernel | weights GB | KV GB | KV tokens | ctx @3 | TTFT cold/warm | answer s 1/3 | gen tok/s 1/3 | tools | grounding | classifier JSON | reasoning | truncated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `qwen36-35b-a3b-nvfp4` | yes | marlin-fallback | 19.55 | 4.9 | 207,842 | 69,280 | 0.472 / 0.074 | 0.225 / 0.41 | 253.6 / 155.9 | 0.75 | **1.0** | 1.0 | **0** | **0** |
+
+Budgets: latency 256 tokens, tools 512, grounding 512, classifier 128. Reasoning
+emitted: 0 of 24 replies, so the parameter was honoured rather than ignored — the
+tripwire that makes the rest of the row meaningful.
+
+**Memory reproduces exactly.** Weights 19.55 GiB, KV cache 4.9 GiB, 207,842 tokens, on
+the same pin and the same image. Two runs a day apart agreeing to the decimal is the
+evidence that these numbers can be written into a profile.
+
+**Grounding 6/6.** Every part number, torque figure, capacity, filter designation and
+error code reproduced exactly, no wrong figure quoted from the surrounding context, and
+the case whose answer is absent was refused rather than invented. This is the measure
+SPEC §2 cares most about, and on 4-bit-with-FP8-layers weights it is perfect here.
+
+**Latency, including the part TTFT hides.** Warm TTFT 0.074 s. A whole answer takes
+0.225 s alone and 0.41 s with three sessions at once (worst 0.428 s), generating 253.6
+tokens/s alone and 155.9 tokens/s per stream at three concurrent — a 1.6× slowdown
+under the load §1 actually asks for. Answers here are 35–43 tokens; a 256-token answer
+at the concurrent rate would take about 1.6 s. Marlin's cost is visible in this column
+and invisible in TTFT, which is why it is now measured.
+
+**Tools 6/8, and the two failures are not the same as last time.** No schema
+violations, no invented tools, no unparseable arguments.
+
+- The Norwegian watering request now works (`duration_min: 10`, `zone: benches`). That
+  miss *was* the token budget.
+- "Water the propagator for two hours" still produces no call. 120 minutes exceeds the
+  parameter maximum of 20, and the case treats clamping or asking as acceptable — it
+  did neither, it simply declined. Safe, and a worse experience than asking.
+- **New, and the one worth attention:** "Turn on the light in the barn" called
+  `set_indoor_light` with `area: "workshop"`. `barn` is not in the enum, so rather than
+  inventing a value that would fail validation, it substituted a *different real area*.
+  Schema-valid and wrong. This is a model picking a plausible-looking argument rather
+  than declining, which is precisely why §3.1 keeps parameters to enums, why the
+  gateway enforces scope server-side (§3.6), and why T2 needs confirmation: nothing
+  about tier or scope may rest on the model getting this right. With the workshop
+  satellite's own scope this call would have been permitted — in the correct area, for
+  the wrong request.
+
+**Classifier unchanged:** 10/10 valid JSON, 9/10 correct, the same ambiguous utterance
+classified `action` where `question` was expected.
+
+### Sampling is not pinned — read the tool score with that in mind
+
+Neither run set `temperature`, so both used the server default and the tool cases are
+not reproducible run to run. That is the most likely explanation for the
+`out-of-enum-area` case passing on 2026-09-22 and failing here: two samples of the same
+model, not a change in it. Grounding and the classifier came out identical or nearly so
+both times, so this affects the tool score most.
+
+Before candidates B and the fallback are scored, the harness should send
+`temperature: 0` (and record it), so a difference between candidates is a difference
+between models. Until then, treat 0.75 as "6 to 8 of 8, with one sample" rather than a
+precise figure.
+
+### Emitted profile (not yet adopted)
+
+```toml
+[profiles.qwen36_35b_a3b_nvfp4]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gb = 19.55
+kv_cache_gb = 4.9
+aux_reserve_gb = 5.0
+card_total_gb = 31.8
+measured_by = "evals/2026-09-23T16-13-25Z"
+```
+
+### Run `evals/2026-09-22T17-39-18Z` — candidate A, KV cache `auto`, thinking on (superseded)
 
 - vLLM image `vllm/vllm-openai:v0.29.0`; GPU RTX 5090, driver 596.36, 32607 MiB
 - `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a052410cfd62085d94b58866fd0f2c3c5` (pin verified current before download)
@@ -160,26 +242,10 @@ checkpoint's vision tensors are 0.83 GiB of 21.80 GiB, and vLLM loaded 19.55 GiB
 Marlin repacking changes sizes too, so this is consistent rather than conclusive. To
 settle it, load once with and once without the flag and compare the reported weights.
 
-### Emitted profile (not yet adopted)
+### Emitted profile (superseded by the run above)
 
-```toml
-[profiles.qwen36_35b_a3b_nvfp4]
-repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
-revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
-quantization = "modelopt_fp4"
-kv_cache_dtype = "auto"
-gpu_memory_utilization = 0.82
-max_model_len = 32768
-weights_gb = 19.55
-kv_cache_gb = 4.9
-aux_reserve_gb = 5.0
-card_total_gb = 31.8
-measured_by = "evals/2026-09-22T17-39-18Z"
-```
-
-The memory numbers are sound and this block is what the harness emitted. It is not
-adopted yet, because adopting a profile means accepting its quality, and the quality
-half of this run has to be repeated.
+Same memory numbers, `measured_by = "evals/2026-09-22T17-39-18Z"`. Superseded because
+the quality half of this run was void, not because the numbers were wrong.
 
 ## What the first run settled
 
@@ -204,8 +270,17 @@ Beyond the numbers, three things that were assumptions before:
 
 ## Decision
 
-_Pending._ Candidate A is a plausible profile on memory and latency, but no model is
-chosen until the quality scores are re-measured with thinking disabled, and until the
-remaining five runs (candidate A at `fp8`, candidates B and the fallback at both
-dtypes) say what they cost. The chosen profile then goes here, in `docs/DECISIONS.md`
-and in `config/farmhub.example.toml`.
+_Pending, but candidate A now has a real result to beat:_ it fits with 6.8 GB of the
+card left over, reproduces every part number and torque figure, returns a complete
+spoken answer in 0.41 s with three satellites talking at once, and needs thinking
+disabled to do any of it.
+
+Still required before a profile is adopted: `temperature: 0` in the harness, candidate
+A at `fp8` KV cache, and candidate B and the fallback at both dtypes. The chosen
+profile then goes here, in `docs/DECISIONS.md` and in `config/farmhub.example.toml`.
+
+**One consequence for the application, whichever model wins:** FarmHub's own client
+must send `enable_thinking: false` (or whatever the chosen model's equivalent is). With
+thinking on, this model produced no usable answer inside a sane token budget, so this
+is a serving requirement rather than a tuning preference. It belongs in `modules/llm`
+and in the profile, and it is not implemented yet.

@@ -230,6 +230,13 @@ The first eval run never started: `--limit-mm-per-prompt {"image":0,"video":0}` 
 ### 2026-09-22: vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`
 The second run failed at device init with "UVA is not available". vLLM v0.29.0 turns pinned host memory off under WSL unless `VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set (upstream opt-in, gated on WSL2 kernel ≥ 4.19.121; the dev PC runs 6.18), and the V2 model runner's staging buffers cannot be allocated without it. `compose.yaml` passes the variable through, defaulting to `0`. `env.example` sets it to `1` for the dev PC, and hub leaves it at `0`, where vLLM ignores it on native Linux anyway. Since this is the dev PC only, it has no bearing on the numbers the eval carries over to hub. **In force (M1, dev PC only).**
 
+### 2026-09-23: thinking mode is switched off for serving, not just for the eval
+With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
+
+So this is a serving requirement, not an eval detail. FarmHub's own client has to send it, or the first real voice question produces a truncated ramble; §1 answers are read aloud. **To implement at M1:** `modules/llm` sends it, and which switch a model needs belongs in the profile beside `quantization` — a future model may spell it differently.
+
+The eval harness also records whether a reply reasoned anyway, and warns, because the parameter is silently ignorable by a backend or a chat template, and a run that ignored it would otherwise look like a clean result. **Recorded (M1); the client change is still to do.**
+
 ### 2026-09-22: the NVFP4 Marlin fallback on sm_120 is confirmed, not theoretical
 SPEC §2 warned that NVFP4 on the RTX 5090 could fall back to Marlin W4A16. The first loading run of `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a` on `vllm/vllm-openai:v0.29.0` confirms it for both paths:
 
