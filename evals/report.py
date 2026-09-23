@@ -68,6 +68,21 @@ def profile_toml(entry: dict[str, Any], identifier: str, card_total_gb: float) -
     )
 
 
+def _pair(single: object, loaded: object) -> str:
+    """One cell for "alone / under load", so the gap is read at a glance."""
+    left = single if single is not None else "?"
+    right = loaded if loaded is not None else "?"
+    return f"{left} / {right}"
+
+
+def total(entry: dict[str, Any], key: str) -> int:
+    """Sum a per-case counter across every scoring case in one run."""
+    return sum(
+        int((entry.get(case) or {}).get(key) or 0)
+        for case in ("latency", "tools", "grounding", "classifier")
+    )
+
+
 def markdown(result: dict[str, Any]) -> str:
     """A summary table plus the emitted profiles, for docs/MODEL_EVAL.md."""
     env = result["environment"]
@@ -81,14 +96,15 @@ def markdown(result: dict[str, Any]) -> str:
         "(Whisper, BGE-M3, reranker share the card on the single-GPU profile)",
         "",
         "| candidate | loaded | kernel | weights GB | KV GB | KV tokens | ctx @3 | "
-        "TTFT cold/warm | tools | grounding | classifier JSON |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "TTFT cold/warm | answer s 1/3 | gen tok/s 1/3 | tools | grounding | "
+        "classifier JSON | reasoning | truncated |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
 
     for entry in result["candidates"]:
         candidate = entry["candidate"]
         if not entry.get("loaded"):
-            lines.append(f"| `{candidate['name']}` | **no** | — | — | — | — | — | — | — | — | — |")
+            lines.append(f"| `{candidate['name']}` | **no** |" + " — |" * 13)
             continue
         startup = entry.get("startup") or {}
         latency = entry.get("latency") or {}
@@ -97,14 +113,25 @@ def markdown(result: dict[str, Any]) -> str:
         classifier = entry.get("classifier") or {}
         cold = latency.get("cold_ttft_s")
         warm = latency.get("warm_ttft_s_median")
+        single = latency.get("single") or {}
+        loaded = latency.get("at_concurrency") or {}
+        # Reasoning and truncation are reported per run, not per case: a run where the
+        # model reasoned anyway has no comparable quality score at all, so it has to be
+        # visible in the same table as the scores it invalidates.
+        rate_loaded = loaded.get("gen_tokens_per_s_median")
+        reasoning = total(entry, "reasoning_emitted")
+        truncations = total(entry, "truncated")
         lines.append(
             f"| `{candidate['name']}` | yes | {entry.get('kernel', '?')} | "
             f"{startup.get('weights_gb', '?')} | {startup.get('kv_cache_gb', '?')} | "
             f"{startup.get('kv_cache_tokens', '?')} | "
             f"{entry.get('usable_context_at_concurrency', '?')} | "
             f"{cold if cold is not None else '?'} / {warm if warm is not None else '?'} | "
+            f"{_pair(single.get('answer_s_median'), loaded.get('answer_s_median'))} | "
+            f"{_pair(single.get('gen_tokens_per_s_median'), rate_loaded)} | "
             f"{tools.get('score', '?')} | {grounding.get('score', '?')} | "
-            f"{classifier.get('json_validity', '?')} |"
+            f"{classifier.get('json_validity', '?')} | "
+            f"{reasoning} | {truncations} |"
         )
 
     lines += ["", "### Emitted profiles", "", "```toml"]

@@ -17,8 +17,15 @@ from typing import Any
 
 import httpx
 
+from evals.cases import common
+
 DATA = Path(__file__).resolve().parent.parent / "data" / "classifier.json"
 KINDS = {"question", "action", "mixed"}
+
+# The reply is one small JSON object (§4), so this is generous. It is only larger than
+# the object needs because a model that reasons first would otherwise be scored as
+# emitting invalid JSON, hiding the actual cause.
+MAX_TOKENS = 128
 
 
 async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, Any]:
@@ -28,23 +35,26 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
 
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
         for case in data["cases"]:
-            payload = {
-                "model": model,
-                "messages": [
+            body = common.payload(
+                model,
+                [
                     {"role": "system", "content": data["system"]},
                     {"role": "user", "content": case["utterance"]},
                 ],
-                "response_format": {
+                max_completion_tokens=MAX_TOKENS,
+                response_format={
                     "type": "json_schema",
                     "json_schema": {"name": "classification", "schema": schema, "strict": True},
                 },
-                "max_completion_tokens": 64,
-            }
+            )
             record: dict[str, Any] = {"id": case["id"], "expect": case["expect"]}
             try:
-                response = await client.post("/v1/chat/completions", json=payload)
+                response = await client.post("/v1/chat/completions", json=body)
                 response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"] or ""
+                choice = response.json()["choices"][0]
+                content = choice["message"]["content"] or ""
+                record["truncated"] = common.truncated(choice)
+                record["reasoning"] = common.reasoning_in(choice["message"])
             except Exception as exc:  # noqa: BLE001 - recorded as an invalid case
                 record.update(valid=False, ok=False, error=f"{type(exc).__name__}: {exc}")
                 results.append(record)
@@ -72,6 +82,9 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
     total = len(results)
     valid = sum(1 for r in results if r.get("valid"))
     return {
+        "max_completion_tokens": MAX_TOKENS,
+        "truncated": sum(1 for r in results if r.get("truncated")),
+        "reasoning_emitted": sum(1 for r in results if r.get("reasoning")),
         "cases": total,
         "valid_json": valid,
         "json_validity": round(valid / total, 3) if total else None,

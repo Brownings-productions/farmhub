@@ -17,6 +17,7 @@ sys.path.insert(0, str(REPO))
 
 from evals import report  # noqa: E402
 from evals.backend import parse_startup  # noqa: E402
+from evals.cases import common  # noqa: E402
 from evals.cases.tools import _violations  # noqa: E402
 from evals.profile import Candidate, Matrix, ProfileError  # noqa: E402
 
@@ -273,3 +274,87 @@ def test_vision_tower_is_not_reported_loaded_from_backend_chatter(tmp_path: Path
         "INFO [mm_encoder_attention.py:372] Using FLASH_ATTN for MMEncoderAttention.\n"
     )
     assert parse_startup(log, tmp_path / "log.txt").vision_tower_loaded is None
+
+
+# --- thinking disabled, and the tripwire for when it is ignored ------------------------
+
+
+def test_every_case_asks_for_thinking_to_be_off() -> None:
+    """One run means one mode. A case that forgot the flag would not be comparable."""
+    body = common.payload("m", [{"role": "user", "content": "hei"}], max_completion_tokens=64)
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["max_completion_tokens"] == 64
+
+
+def test_extra_request_fields_survive() -> None:
+    body = common.payload(
+        "m", [{"role": "user", "content": "hei"}], max_completion_tokens=64, tools=[{"x": 1}]
+    )
+    assert body["tools"] == [{"x": 1}]
+
+
+def test_a_reply_that_reasons_anyway_is_caught() -> None:
+    """The parameter can be silently ignored by a backend or a chat template.
+
+    This is the exact opener from the 2026-09-22 run, when thinking was still on. If it
+    ever appears in a run that asked for thinking to be off, the quality scores from
+    that run mean nothing, so it must not go unnoticed.
+    """
+    message = {"content": "Here's a thinking process:\n\n1. **Analyze User Input:**"}
+    assert common.reasoning_in(message) is not None
+
+
+def test_reasoning_tags_and_the_reasoning_field_are_caught() -> None:
+    assert common.reasoning_in({"content": "<think>hmm</think>8,5 liter"}) is not None
+    assert common.reasoning_in({"reasoning_content": "hmm", "content": "8,5 liter"}) is not None
+
+
+def test_a_plain_answer_is_not_called_reasoning() -> None:
+    assert common.reasoning_in({"content": "Motoroljen er 8,5 liter med filter."}) is None
+    assert common.reasoning_in({"content": "SKF 6205-2RS."}) is None
+    assert common.reasoning_in({}) is None
+
+
+def test_truncation_is_read_from_the_finish_reason() -> None:
+    assert common.truncated({"finish_reason": "length"}) is True
+    assert common.truncated({"finish_reason": "stop"}) is False
+    assert common.truncated({}) is False
+
+
+def test_the_run_table_shows_reasoning_and_answer_time() -> None:
+    """A run that reasoned must say so in the same table as the scores it invalidates."""
+    result = {
+        "run_id": "r1",
+        "environment": {"vllm_image": "i", "gpu": "g", "driver": "d", "memory_total": "m"},
+        "aux_reserve_gb": 5.0,
+        "concurrent_sessions": 3,
+        "card_total_gb": 31.8,
+        "candidates": [
+            {
+                "candidate": {"name": "c"},
+                "loaded": True,
+                "kernel": "marlin-fallback",
+                "startup": {"weights_gb": 19.55, "kv_cache_gb": 4.9, "kv_cache_tokens": 207842},
+                "usable_context_at_concurrency": 69280,
+                "latency": {
+                    "cold_ttft_s": 0.4,
+                    "warm_ttft_s_median": 0.08,
+                    "reasoning_emitted": 2,
+                    "single": {"answer_s_median": 3.2, "gen_tokens_per_s_median": 61.0},
+                    "at_concurrency": {
+                        "answer_s_median": 5.1,
+                        "gen_tokens_per_s_median": 38.0,
+                    },
+                },
+                "tools": {"score": 0.88, "truncated": 1},
+                "grounding": {"score": 0.83},
+                "classifier": {"json_validity": 1.0},
+                "profile_toml": "",
+            }
+        ],
+    }
+    table = report.markdown(result)
+    assert "3.2 / 5.1" in table
+    assert "61.0 / 38.0" in table
+    assert report.total(result["candidates"][0], "reasoning_emitted") == 2
+    assert report.total(result["candidates"][0], "truncated") == 1

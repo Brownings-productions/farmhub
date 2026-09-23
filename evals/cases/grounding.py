@@ -20,7 +20,14 @@ from typing import Any
 
 import httpx
 
+from evals.cases import common
+
 DATA = Path(__file__).resolve().parent.parent / "data" / "grounding.json"
+
+# Room for a complete answer with thinking disabled. Recorded in the run, and every
+# case records whether it was cut off anyway, because a truncated answer scored as a
+# wrong part number once already.
+MAX_TOKENS = 512
 
 SYSTEM = (
     "Answer the question using only the supplied context. Quote part numbers, codes "
@@ -53,28 +60,33 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
 
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
         for case in data["cases"]:
-            payload = {
-                "model": model,
-                "messages": [
+            body = common.payload(
+                model,
+                [
                     {"role": "system", "content": SYSTEM},
                     {
                         "role": "user",
                         "content": f"Context:\n{case['context']}\n\nQuestion: {case['question']}",
                     },
                 ],
-                "max_completion_tokens": 256,
-            }
+                max_completion_tokens=MAX_TOKENS,
+            )
             record: dict[str, Any] = {"id": case["id"]}
             try:
-                response = await client.post("/v1/chat/completions", json=payload)
+                response = await client.post("/v1/chat/completions", json=body)
                 response.raise_for_status()
-                answer = response.json()["choices"][0]["message"]["content"] or ""
+                choice = response.json()["choices"][0]
+                answer = choice["message"]["content"] or ""
             except Exception as exc:  # noqa: BLE001 - recorded as a failed case
                 record.update(ok=False, error=f"{type(exc).__name__}: {exc}")
                 results.append(record)
                 continue
 
-            record["answer"] = answer.strip()[:300]
+            # The whole answer, not a prefix: the first run stored 300 characters and
+            # the truncation was invisible in the results file.
+            record["answer"] = answer.strip()
+            record["truncated"] = common.truncated(choice)
+            record["reasoning"] = common.reasoning_in(choice["message"])
             lowered = answer.lower()
 
             if case.get("expect_refusal"):
@@ -100,6 +112,9 @@ async def run(base_url: str, model: str, timeout_s: float = 120.0) -> dict[str, 
     total = len(results)
     correct = sum(1 for r in results if r.get("ok"))
     return {
+        "max_completion_tokens": MAX_TOKENS,
+        "truncated": sum(1 for r in results if r.get("truncated")),
+        "reasoning_emitted": sum(1 for r in results if r.get("reasoning")),
         "cases": total,
         "correct": correct,
         "wrong_figure_quoted": sum(1 for r in results if r.get("wrong_figures")),
