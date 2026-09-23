@@ -241,6 +241,10 @@ The plan is no longer "develop anywhere, then build `hub`". It is two named phas
 
 **Model inference runs on one machine at a time.** `nas`, `tv` and `ha` never run it, whatever GPU they hold. The only exception is wake-word detection on the satellites, which is a keyword spotter rather than a model FarmHub serves; §8.8 does not currently say where it runs and M9 settles it.
 
+**There is no overnight escape hatch.** An earlier draft of this said the LLM could be stopped overnight to make room for §8.4's contextual retrieval. It cannot: that batch job uses the local LLM to write its blurbs, so it is one more tenant on the shared card. Whether serving goes offline overnight at all is not decided here.
+
+**What Phase 1 does not settle** is uptime, recorded as SPEC §14 **Q9 (M1)**: the dev PC is the running system for a year, yet vLLM is started by hand (`restart: "no"` on purpose, `deploy/vllm/compose.yaml`) and Windows reboots for updates. How both come back, and what a satellite hears meanwhile, is settled before the M1 end-to-end test through Home Assistant.
+
 Supersedes the 2026-09-20 entry below, which wrote the 3070 out of the plan and made the second GPU conditional on M1's measurements. Part of SPEC v1.4, amending §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4).**
 
 ### 2026-09-23: storage and media split into `nas` and `tv`

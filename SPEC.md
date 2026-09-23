@@ -8,7 +8,7 @@ Version 1.4. Everything here was decided deliberately. Where a decision looks od
 
 ## Changes in v1.4
 
-Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISIONS.md`). **Amends §2 and §11 only**, so like v1.3 it needs no safety acceptance. Rows 2–5 supersede rows 1, 2 and 7 of v1.3, which are left in place as history.
+Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISIONS.md`). **Amends §2 and §11, and adds one question to §14's open list**; no §3 rule is touched, so like v1.3 it needs no safety acceptance. Rows 2–5 supersede rows 1, 2 and 7 of v1.3, which are left in place as history.
 
 **Status: proposed.** v1.4 is accepted as a whole once it has been read.
 
@@ -21,6 +21,8 @@ Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISI
 | 5 | §2 Machines, §2 Inference backend | The dev PC's card after the swap is an **RTX 5080 16 GB or a used RTX 4090 24 GB, undecided** (v1.3 row 7 named the 5080). Its role is the offline fallback; normally it uses vLLM on `hub` over the LAN. |
 | 6 | §2 Machines | States the rule plainly: **model inference runs on one machine at a time**, and `nas`, `tv` and `ha` never run it. |
 | 7 | §11 | Phase 1 means M1–M12 are all built and measured on the dev PC's 5090, so the shared card constrains M3, M4 and M9 as much as M1. The "nothing before M9 requires dedicated hardware" note is rewritten; §9's "no test may require a GPU" is unchanged. |
+| 8 | §2 GPU assignment | Drops the claim that overnight batch work is where the LLM can be stopped to make room. §8.4's contextual retrieval **needs** the local LLM to write its blurbs, so it is another tenant on the shared card, and taking serving offline overnight is not a decision this SPEC makes. |
+| 9 | §14 | **New Q9 (M1): Phase 1 uptime.** The dev PC is the running system for a year, but vLLM is started by hand and Windows reboots for updates. How both come back, and what a satellite hears while they are down, is unsettled. |
 
 ---
 
@@ -134,7 +136,7 @@ ha is a separate physical machine on purpose. Heating and pumps must keep workin
 
 ### GPU assignment
 
-**Phase 1 — one card, shared.** vLLM, faster-whisper, BGE-M3 and bge-reranker-v2-m3 all live on the dev PC's 5090, and each profile says in numbers how that card is divided. This is the production arrangement until `hub` exists, so M3's embedding during ingest, M4's reranking during retrieval and M9's Whisper all have to fit beside a loaded LLM. Overnight batch work (§8.4's contextual retrieval) is the one place where the LLM can be stopped to make room.
+**Phase 1 — one card, shared.** vLLM, faster-whisper, BGE-M3 and bge-reranker-v2-m3 all live on the dev PC's 5090, and each profile says in numbers how that card is divided. This is the production arrangement until `hub` exists, so M3's embedding during ingest, M4's reranking during retrieval and M9's Whisper all have to fit beside a loaded LLM. There is no "stop the LLM overnight" escape hatch: §8.4's contextual retrieval needs the local LLM to write the blurbs, so the batch job is one more tenant on the shared card rather than a reason to unload it, and taking serving offline overnight is not a decision this SPEC makes.
 
 **Phase 2 — two cards, and the 5090 serves the LLM and nothing else:**
 
@@ -686,3 +688,4 @@ Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Ho
 - **Q6 (M8): Voice confirmation.** The fixed-intent form in §3.3 ("confirm" / "bekreft" handled deterministically by HA, calling the confirm endpoint with the satellite's `device_id`) is provisional. Settle: reading the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions.
 - **Q7 (M12): Printer stack.** Moonraker, OctoPrint or PrusaLink. Their upload APIs can start a print (a `print` flag or an auto-start queue); the upload client must never use either, with a test.
 - **Q8 (M2): Audit sink composition.** Leaning yes: JSONL is the mandatory write-ahead record (a failed JSONL write denies the call), and Postgres is written as well with idempotent catch-up from JSONL after an outage, so a database outage does not deny every tool.
+- **Q9 (M1): Phase 1 uptime.** The dev PC is the running system for about a year (§2), but it is not run like a server: vLLM is started by hand (`deploy/vllm/vllm.sh`, `restart: "no"` on purpose so a Docker Desktop restart cannot silently reclaim the card), and Windows reboots for updates whenever it likes. Settle how vLLM and the FarmHub app come back after a reboot, and what a satellite hears while they are down — HA's own intents keep working (§3.2), so the answer may be "nothing, and FarmHub says it is unavailable", but that has to be chosen rather than discovered. To settle before the M1 end-to-end test through Home Assistant.
