@@ -8,11 +8,19 @@ Version 1.4. Everything here was decided deliberately. Where a decision looks od
 
 ## Changes in v1.4
 
-Corrects §2 Machines for the storage and media split of 2026-09-23. **Amends §2 only**, so like v1.3 it needs no safety acceptance.
+Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISIONS.md`). **Amends §2 and §11 only**, so like v1.3 it needs no safety acceptance. Rows 2–5 supersede rows 1, 2 and 7 of v1.3, which are left in place as history.
+
+**Status: proposed.** v1.4 is accepted as a whole once it has been read.
 
 | # | Section | Change |
 |---|---------|--------|
-| 1 | §2 Machines | The `nas` row was out of date. `nas` is now a **new TrueNAS build** for the corpus, media and backups, starting on integrated graphics with a transcoding GPU possible later. The old TrueNAS box becomes `tv`, a TV and emulation machine keeping the GTX 1060 until that card is upgraded; it is **not part of the FarmHub system**. Both rows keep "never an AI target": `hub` is the only machine that runs models. |
+| 1 | §2 Machines | The `nas` row was out of date. `nas` is now a **new TrueNAS build** for the corpus, media and backups, starting on integrated graphics with a transcoding GPU possible later. The old TrueNAS box becomes `tv`, a TV and emulation machine keeping the GTX 1060 until that card is upgraded; it is **not part of the FarmHub system**. Both rows keep "never an AI target". |
+| 2 | §2 Machines, §2 GPU assignment | **The hardware plan has two phases.** Phase 1 (now to ~Sept 2027) runs FarmHub on the **dev PC's RTX 5090**, sharing that card between the LLM and the helper models. Phase 2 is `hub` with an **RTX 5090 + RTX 3070 8 GB**. The 3070 is no longer "gone" (v1.3 row 1) and the second GPU is no longer "optional, decided after M1" (v1.3 row 2). |
+| 3 | §2 Machines | The `dev` row is no longer "not part of the running system": in Phase 1 it **is** the running system. An RTX 3070 cannot be added to it — the PSU will not take it — which is why Phase 1 shares one card. |
+| 4 | §2 GPU assignment | **A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub`; `kv_cache_gb` does not, and no dual-GPU profile is adopted until an eval run on `hub` produces it. Replaces v1.3's "everything it measures is about the card, not the chassis". |
+| 5 | §2 Machines, §2 Inference backend | The dev PC's card after the swap is an **RTX 5080 16 GB or a used RTX 4090 24 GB, undecided** (v1.3 row 7 named the 5080). Its role is the offline fallback; normally it uses vLLM on `hub` over the LAN. |
+| 6 | §2 Machines | States the rule plainly: **model inference runs on one machine at a time**, and `nas`, `tv` and `ha` never run it. |
+| 7 | §11 | Phase 1 means M1–M12 are all built and measured on the dev PC's 5090, so the shared card constrains M3, M4 and M9 as much as M1. The "nothing before M9 requires dedicated hardware" note is rewritten; §9's "no test may require a GPU" is unchanged. |
 
 ---
 
@@ -105,44 +113,49 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 
 | Host | Hardware | Role |
 |------|----------|------|
-| hub | Ubuntu 24.04, RTX 5090 32 GB (second GPU 8–12 GB optional, slot reserved) | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
+| hub | Ubuntu 24.04, RTX 5090 32 GB + RTX 3070 8 GB (Phase 2; does not exist yet) | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
 | ha | N100 mini PC or Pi 5 + NVMe, Home Assistant OS | Home Assistant and all safety-critical automation |
 | nas (media) | New TrueNAS build, integrated graphics | Document corpus, media, backups. A transcoding GPU may be added later — **never an AI target** |
 | tv (console) | The current TrueNAS box repurposed, keeping the GTX 1060 until it is upgraded | TV and emulation. **Not part of the FarmHub system, and never an AI target** |
 | sat-* | Raspberry Pi 4/5 | Wyoming voice satellites: kitchen, barn, workshop |
-| dev | ClevatessPrime: Windows + WSL2 + Docker Desktop, currently holding the RTX 5090 | Development, and the M1 model evaluation. Not part of the running system |
+| dev | ClevatessPrime: Windows + WSL2 + Docker Desktop, RTX 5090 32 GB | **Phase 1: the runtime host.** Development, every milestone's measurements, and the running system until `hub` exists |
 
-**hub is the only machine that runs models.** The corpus lives on `nas` and is read over the network; a GPU in `nas` would be for transcoding and a GPU in `tv` is for games. Neither is ever an inference target, however convenient it looks — model serving stays on one machine so its memory budget (below) means something.
+**Model inference runs on one machine at a time** — the dev PC in Phase 1, `hub` in Phase 2. `nas`, `tv` and `ha` never run it, whatever spare GPU they happen to hold: the corpus is read over the network, a GPU in `nas` would be for transcoding and a GPU in `tv` is for games. After the swap the dev PC keeps a small-model profile for offline work, so "one machine" means one *serving* host at a time rather than one machine forever. The single exception is wake-word detection on the satellites, which is a keyword spotter rather than a model FarmHub serves; §8.8 does not say today where it runs, and M9 settles it.
 
-hub is a **new build and does not exist yet**. There is one RTX 5090. It is in the dev PC today and moves to hub when hub is built; the dev PC then takes an RTX 5080 16 GB. Until the swap, M1's model evaluation runs on the dev PC's 5090 — everything it measures is about the card, not the chassis, so the numbers carry over to hub.
+Where §2 and §8 say `hub` — Piper, Whisper, Postgres, the app itself — read "the Phase 1 runtime host" until `hub` is built.
 
-hub is specified with a free PCIe x16 slot and PSU headroom for an optional second GPU of 8–12 GB, dedicated to the auxiliary models. Whether to buy it is decided after M1 measures what the single-GPU profile actually leaves. The 5090 is power-limited to ~450 W since the machine runs permanently — inference loses very little and it runs cooler and quieter.
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1.
+
+**Phase 2, `hub`.** A new build with an RTX 5090 32 GB **and** an RTX 3070 8 GB — decided, not optional. The 5090 then serves the LLM alone and the helpers move to the 3070. The 5090 is power-limited to ~450 W since the machine runs permanently: inference loses very little and it runs cooler and quieter.
+
+The 5090 moves from the dev PC to `hub` when `hub` is built. The dev PC then takes an **RTX 5080 16 GB or a used RTX 4090 24 GB — undecided**, settled at the swap.
 
 ha is a separate physical machine on purpose. Heating and pumps must keep working when the GPU box is down, being patched, or has thrown a driver fault. This is an architectural rule, not a preference. Never propose collapsing ha into hub.
 
 ### GPU assignment
 
-**The single-GPU profile is the default.** hub starts with one card, so vLLM, faster-whisper, BGE-M3 and bge-reranker-v2-m3 all share the 5090, and each profile says in numbers how that card is divided.
+**Phase 1 — one card, shared.** vLLM, faster-whisper, BGE-M3 and bge-reranker-v2-m3 all live on the dev PC's 5090, and each profile says in numbers how that card is divided. This is the production arrangement until `hub` exists, so M3's embedding during ingest, M4's reranking during retrieval and M9's Whisper all have to fit beside a loaded LLM. Overnight batch work (§8.4's contextual retrieval) is the one place where the LLM can be stopped to make room.
 
-**The dual-GPU profile is optional.** When a second GPU is fitted, the old hard rule applies unchanged — the 5090 serves the LLM and nothing else:
+**Phase 2 — two cards, and the 5090 serves the LLM and nothing else:**
 
 - `CUDA_VISIBLE_DEVICES=0` → vLLM, configured by a model profile (below).
-- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB.
+- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB on the 3070's 8 GB.
 
-Config carries per-model profiles: model id, `revision`, quantization, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gb`, `kv_cache_gb` and `aux_reserve_gb`. None of these is hard-coded.
+Config carries per-model profiles: model id, `revision`, quantization, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gb`, `kv_cache_gb`, `aux_reserve_gb` and the chat-template switches the model needs. None of these is hard-coded.
 
-Rules that replace "the 5090 serves the LLM and nothing else" as the default guard, so "never silently OOM" keeps teeth:
+Rules that make "never silently OOM" keep teeth while one card is shared:
 
-- Every profile declares `aux_reserve_gb`, the memory the auxiliary models need. On the dual-GPU profile it is zero, because they live on the other card.
+- Every profile declares `aux_reserve_gb`, the memory the auxiliary models need: ~5 in Phase 1, **zero** in Phase 2, where they live on the other card.
 - Config validation rejects a profile whose `weights_gb + kv_cache_gb + aux_reserve_gb` exceeds the card, and one whose `gpu_memory_utilization` does not leave at least `aux_reserve_gb` free.
 - **vLLM starts before the auxiliary models**, so its utilization fraction is computed against a known-free card rather than against whatever happened to load first.
 - **The budget numbers are measured, not estimated.** `weights_gb` and `kv_cache_gb` come from an evaluation run on the real card (§11 M1, `docs/MODEL_EVAL.md`), and a profile records the run that produced them. A profile carrying hand-written numbers is not a valid profile.
+- **A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub` — same card, same checkpoint — but `kv_cache_gb` does not: it is whatever is left once the helpers are on another card and no desktop is using the GPU. **No Phase 2 profile is adopted until an eval run on `hub` produces it.**
 
-This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible.
+This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible. It is also deliberately incomplete: it counts weights and KV cache but not peak activation or CUDA graph memory, which live inside vLLM's share too (about 1.2 GiB on the measured profile, `docs/MODEL_EVAL.md`). Treat a profile that only just passes as one that has not been tried.
 
-FP8 weights for a 30B-class model run to ~30 GB, which exceeds 0.90 × 32 GB before any auxiliary reservation is taken out. The single-GPU profile therefore needs a smaller quantization — see Models below.
+FP8 weights for a 30B-class model run to ~30 GB, which exceeds 0.90 × 32 GB before any auxiliary reservation is taken out. Sharing one card therefore needs a smaller quantization — see Models below.
 
-After the card swap the dev PC has an RTX 5080 16 GB. Its profile selects a smaller model and loads the auxiliary models onto the same device, logging a warning at startup. Lowering the utilization of the same model is not a valid degradation. Never silently OOM.
+After the swap the dev PC's profile selects a smaller model and loads the auxiliary models onto the same device, logging a warning at startup. That profile is the offline fallback only; normally the dev PC uses vLLM on `hub`. Lowering the utilization of the same model is not a valid degradation. Never silently OOM.
 
 ### Models
 
@@ -174,7 +187,7 @@ Primary: vLLM, OpenAI-compatible server, automatic prefix caching enabled. The s
 
 The application talks to the LLM only through an `LLMBackend` protocol implemented by an OpenAI-compatible client. Switching to Ollama must be a config change, never a code change. Do not import vLLM anywhere outside `modules/llm/`.
 
-After the card swap, the dev PC talks to vLLM on hub over the LAN through that same protocol, with a small-model profile on its RTX 5080 as the offline fallback. Both are config, not code.
+In Phase 1 the backend is local to the dev PC. After the card swap the dev PC talks to vLLM on `hub` over the LAN through that same protocol, with a small-model profile on whichever card it ends up with (5080 16 GB or used 4090 24 GB) as the offline fallback. Both are config, not code.
 
 ## 3. Non-negotiable safety rules
 
@@ -607,7 +620,7 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 | # | Milestone | Done when |
 |---|-----------|-----------|
 | M0 | Scaffold: pyproject, config, logging, AppContext, registry, protocols, CI | `farmhub --version` runs, an empty module loads, CI green |
-| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs pinned by revision and a fitting model profile verified against measured numbers (§2), evaluated on the dev PC's 5090 before the card moves to hub. Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
+| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs pinned by revision and a fitting model profile verified against measured numbers (§2), evaluated on the dev PC's 5090 — the Phase 1 runtime host, where it stays. Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
 | M2 | Storage, migrations, records | Service events insert and query by CLI. JSONL audit sink implemented alongside the Postgres sink and its catch-up (Q8) |
 | M3 | ingest: parse, chunk, embed, manifest | Corpus indexes; rerun is a no-op; library check lints |
 | M4 | rag: hybrid retrieval + rerank + search_documents | Cited answers from manuals, with pages |
@@ -622,7 +635,9 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 
 M5 through M8 are where haste causes real damage. Slow down there. Write each §9 test before the code it guards.
 
-Note: nothing before M9 requires *dedicated* hardware. M0–M8 can be developed against WSL2, Ollama, or a mocked LLM on any machine. The one exception is M1's model evaluation, which needs the RTX 5090 itself — it runs on the dev PC while the card is still there. No test in any milestone may require a GPU (§9).
+Note on hardware: in Phase 1 every milestone runs on the dev PC's RTX 5090 (§2), so "dedicated hardware" is not a later concern — it is the one card, shared, from M1 onwards. That is a real constraint on M3 (embedding while the LLM is loaded), M4 (reranking on the same card) and M9 (Whisper and Piper beside both), and each of those has to measure what it costs rather than assume there is room. `hub` and its second GPU change the arithmetic when they arrive, not the design.
+
+Development itself still needs none of this: M0–M12 can be *developed* against Ollama or a mocked LLM, and **no test in any milestone may require a GPU** (§9).
 
 ## 12. Standards
 
@@ -667,7 +682,7 @@ Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Ho
 - **Q2 (M6): Action-verb and alias list for the classifier pre-pass.** Proposed source: derived automatically from tool names and descriptions in `config/tools/`, plus a hand-maintained Norwegian and English verb list.
 - **Q3 (M6): Rate limits for T0 and T1.** Only T2 has a default. Propose values.
 - **Q4 (M12): Preview rendering.** How the three PNG previews are rendered inside the sandbox (OpenSCAD's renderer, a headless mesh renderer, or CadQuery SVG export converted to PNG). Must not add a network-capable dependency to the sandbox.
-- **Q5 (M12): Sandbox mechanism.** Plain subprocess with resource limits versus a container, given what is available on hub.
+- **Q5 (M12): Sandbox mechanism.** Plain subprocess with resource limits versus a container, given what is available on the runtime host (the dev PC's WSL2 in Phase 1, `hub` in Phase 2 — §2).
 - **Q6 (M8): Voice confirmation.** The fixed-intent form in §3.3 ("confirm" / "bekreft" handled deterministically by HA, calling the confirm endpoint with the satellite's `device_id`) is provisional. Settle: reading the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions.
 - **Q7 (M12): Printer stack.** Moonraker, OctoPrint or PrusaLink. Their upload APIs can start a print (a `print` flag or an auto-start queue); the upload client must never use either, with a test.
 - **Q8 (M2): Audit sink composition.** Leaning yes: JSONL is the mandatory write-ahead record (a failed JSONL write denies the call), and Postgres is written as well with idempotent catch-up from JSONL after an outage, so a database outage does not deny every tool.

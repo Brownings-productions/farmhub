@@ -230,12 +230,25 @@ The first eval run never started: `--limit-mm-per-prompt {"image":0,"video":0}` 
 ### 2026-09-22: vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`
 The second run failed at device init with "UVA is not available". vLLM v0.29.0 turns pinned host memory off under WSL unless `VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set (upstream opt-in, gated on WSL2 kernel ≥ 4.19.121; the dev PC runs 6.18), and the V2 model runner's staging buffers cannot be allocated without it. `compose.yaml` passes the variable through, defaulting to `0`. `env.example` sets it to `1` for the dev PC, and hub leaves it at `0`, where vLLM ignores it on native Linux anyway. Since this is the dev PC only, it has no bearing on the numbers the eval carries over to hub. **In force (M1, dev PC only).**
 
+### 2026-09-23: the hardware plan has two phases, and Phase 1 is the dev PC
+The plan is no longer "develop anywhere, then build `hub`". It is two named phases, and the first one lasts about a year.
+
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured **and run** on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine — the PSU will not take it — so the LLM and the helper models (faster-whisper, BGE-M3, the reranker, ~5 GB) share the one card, with `aux_reserve_gb ≈ 5`. This is the production profile for the next year, not a fallback and not a degradation, which is the part that matters for planning: it constrains **M3** (embedding while an LLM is loaded), **M4** (reranking on the same card) and **M9** (Whisper and Piper beside both) exactly as much as it constrains M1. Each of those milestones has to measure what it costs rather than assume there is room.
+
+**Phase 2, `hub`.** RTX 5090 32 GB **plus** RTX 3070 8 GB, decided rather than optional. The 5090 then serves the LLM alone, the helpers move to the 3070, and `aux_reserve_gb` becomes 0. The dev PC takes an RTX 5080 16 GB or a used RTX 4090 24 GB — undecided, settled at the swap — and from then on talks to vLLM on `hub` over the LAN, keeping a small-model local profile as the offline fallback.
+
+**A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub`, because it is the same card and the same checkpoint. `kv_cache_gb` does not: it is whatever is left once the helpers are elsewhere and no desktop is using the GPU. So **no Phase 2 profile is adopted until an eval run on `hub` produces it**, and the 2026-09-22/23 numbers are explicitly Phase 1 numbers.
+
+**Model inference runs on one machine at a time.** `nas`, `tv` and `ha` never run it, whatever GPU they hold. The only exception is wake-word detection on the satellites, which is a keyword spotter rather than a model FarmHub serves; §8.8 does not currently say where it runs and M9 settles it.
+
+Supersedes the 2026-09-20 entry below, which wrote the 3070 out of the plan and made the second GPU conditional on M1's measurements. Part of SPEC v1.4, amending §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4).**
+
 ### 2026-09-23: storage and media split into `nas` and `tv`
 The `nas` row in SPEC §2 described a machine that no longer matches the plan. `nas` is now a new TrueNAS build — corpus, media and backups — starting on integrated graphics, with a transcoding GPU possible later. The existing TrueNAS box becomes `tv`, a TV and emulation machine that keeps its GTX 1060 until that card is upgraded, and is not part of the FarmHub system at all.
 
-Both keep the old rule: **never an AI target.** `hub` is the only machine that runs models. A spare GPU in a media box is a standing temptation, and spreading inference across machines would make `hub`'s measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
+Both keep the old rule: **never an AI target.** Model inference runs on one machine at a time — the dev PC in Phase 1, `hub` in Phase 2 (see the entry below). A spare GPU in a media box is a standing temptation, and spreading inference across machines would make the runtime host's measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
 
-Accepted as SPEC v1.4 (2026-09-23), amending §2 only — no §3 rule is touched. **Accepted (SPEC v1.4).**
+Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4)**, accepted with the revision as a whole.
 
 ### 2026-09-23: thinking mode is switched off for serving, not just for the eval
 With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
@@ -283,6 +296,8 @@ The inference backend is the official `vllm/vllm-openai` image, defined once in 
 ## Decided after M0 (2026-09-20)
 
 ### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists
+**Superseded by SPEC v1.4 (2026-09-23)** — see "the hardware plan has two phases" above. The topology below is still right; what changed is that the second GPU is a committed RTX 3070 rather than an optional 8–12 GB card decided after M1, that the dev PC is the runtime host for about a year rather than a development machine, and that its post-swap card is undecided. Kept because it is why the 3070 was written out of the plan and then back into it, and because the `aux_reserve_gb` rules below are unchanged and still in force.
+
 The hardware plan changed. hub is no longer the repurposed desktop: it is a new build that does not exist yet. There is one RTX 5090, currently in the dev PC (ClevatessPrime, Windows + WSL2); it moves to hub when hub is built, and the dev PC then takes an RTX 5080 16 GB. hub is specified with a free PCIe x16 slot and PSU headroom for an optional 8–12 GB auxiliary card, bought or not after M1 measures what the single-GPU profile leaves. The RTX 3070 is gone from the plan.
 
 Consequences, all in §2 and §11 only — **no §3 rule is touched**:
