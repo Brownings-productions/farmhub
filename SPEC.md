@@ -2,7 +2,17 @@
 
 A local-first AI hub for a Norwegian homestead: RAG over farm documents, voice satellites, Home Assistant control, web lookups, and parametric CAD generation. Single Python spine, pluggable modules.
 
-Version 1.3. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+Version 1.4. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+
+---
+
+## Changes in v1.4
+
+Corrects §2 Machines for the storage and media split of 2026-09-23. **Amends §2 only**, so like v1.3 it needs no safety acceptance.
+
+| # | Section | Change |
+|---|---------|--------|
+| 1 | §2 Machines | The `nas` row was out of date. `nas` is now a **new TrueNAS build** for the corpus, media and backups, starting on integrated graphics with a transcoding GPU possible later. The old TrueNAS box becomes `tv`, a TV and emulation machine keeping the GTX 1060 until that card is upgraded; it is **not part of the FarmHub system**. Both rows keep "never an AI target": `hub` is the only machine that runs models. |
 
 ---
 
@@ -97,9 +107,12 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 |------|----------|------|
 | hub | Ubuntu 24.04, RTX 5090 32 GB (second GPU 8–12 GB optional, slot reserved) | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
 | ha | N100 mini PC or Pi 5 + NVMe, Home Assistant OS | Home Assistant and all safety-critical automation |
-| nas | TrueNAS, GTX 1060 | Document corpus, media, backups. The 1060 is for Jellyfin transcoding — never an AI target |
+| nas (media) | New TrueNAS build, integrated graphics | Document corpus, media, backups. A transcoding GPU may be added later — **never an AI target** |
+| tv (console) | The current TrueNAS box repurposed, keeping the GTX 1060 until it is upgraded | TV and emulation. **Not part of the FarmHub system, and never an AI target** |
 | sat-* | Raspberry Pi 4/5 | Wyoming voice satellites: kitchen, barn, workshop |
 | dev | ClevatessPrime: Windows + WSL2 + Docker Desktop, currently holding the RTX 5090 | Development, and the M1 model evaluation. Not part of the running system |
+
+**hub is the only machine that runs models.** The corpus lives on `nas` and is read over the network; a GPU in `nas` would be for transcoding and a GPU in `tv` is for games. Neither is ever an inference target, however convenient it looks — model serving stays on one machine so its memory budget (below) means something.
 
 hub is a **new build and does not exist yet**. There is one RTX 5090. It is in the dev PC today and moves to hub when hub is built; the dev PC then takes an RTX 5080 16 GB. Until the swap, M1's model evaluation runs on the dev PC's 5090 — everything it measures is about the card, not the chassis, so the numbers carry over to hub.
 

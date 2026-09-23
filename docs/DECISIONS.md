@@ -230,6 +230,13 @@ The first eval run never started: `--limit-mm-per-prompt {"image":0,"video":0}` 
 ### 2026-09-22: vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`
 The second run failed at device init with "UVA is not available". vLLM v0.29.0 turns pinned host memory off under WSL unless `VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set (upstream opt-in, gated on WSL2 kernel ≥ 4.19.121; the dev PC runs 6.18), and the V2 model runner's staging buffers cannot be allocated without it. `compose.yaml` passes the variable through, defaulting to `0`. `env.example` sets it to `1` for the dev PC, and hub leaves it at `0`, where vLLM ignores it on native Linux anyway. Since this is the dev PC only, it has no bearing on the numbers the eval carries over to hub. **In force (M1, dev PC only).**
 
+### 2026-09-23: storage and media split into `nas` and `tv`
+The `nas` row in SPEC §2 described a machine that no longer matches the plan. `nas` is now a new TrueNAS build — corpus, media and backups — starting on integrated graphics, with a transcoding GPU possible later. The existing TrueNAS box becomes `tv`, a TV and emulation machine that keeps its GTX 1060 until that card is upgraded, and is not part of the FarmHub system at all.
+
+Both keep the old rule: **never an AI target.** `hub` is the only machine that runs models. A spare GPU in a media box is a standing temptation, and spreading inference across machines would make `hub`'s measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
+
+Accepted as SPEC v1.4 (2026-09-23), amending §2 only — no §3 rule is touched. **Accepted (SPEC v1.4).**
+
 ### 2026-09-23: thinking mode is switched off for serving, not just for the eval
 With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
 
