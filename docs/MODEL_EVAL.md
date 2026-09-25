@@ -2,14 +2,15 @@
 
 Which model FarmHub serves, and the measurements behind that choice.
 
-**Status: candidate A measured with valid quality scores (2026-09-23); 5 of 6 matrix
-runs still to do.** Candidate A loads and serves on the dev PC's RTX 5090, reproduces
-part numbers and torque figures perfectly with thinking disabled, and answers a spoken
-question in well under a second. No profile is adopted yet: the other five runs
-(candidate A at `fp8`, candidate B and the fallback at both dtypes) have not run, and
-the harness has since changed in ways that make those runs comparable — sampling is now
-pinned, tool cases are repeated, and a RAG-sized prompt is timed. Candidate A will be
-re-run on the new harness before anything else.
+**Status: candidate A measured on the current harness (2026-09-25); 5 of 6 matrix runs
+still to do.** Candidate A loads and serves on the dev PC's RTX 5090, reproduces every
+part number and torque figure with thinking disabled, and answers a spoken question in
+well under a second — including on a 10,000-token RAG prompt. Its memory numbers have now
+reproduced across three runs. No profile is adopted yet: candidate A at `fp8`, and
+candidate B and the fallback at both dtypes, have not run. Read the 2026-09-25 run;
+the two below it predate the harness changes (pinned sampling, repeated tool cases,
+bucketed out-of-enum outcomes, a RAG-sized prompt, `nvidia-smi` while serving) and their
+tool scores cannot be compared with anything.
 
 ## Why this exists
 
@@ -91,6 +92,144 @@ All data is synthetic and committed under `evals/data/`. The machines, part numb
 and figures are invented; nothing there should be believed outside this harness.
 
 ## Results
+
+### Run `evals/2026-09-25T15-07-51Z` — candidate A, KV cache `auto`, current harness
+
+Candidate A on the harness as it now stands: `temperature: 0` on every request, the tool
+cases run three times, out-of-enum outcomes bucketed, a RAG-sized prompt timed, and
+`nvidia-smi` read while the model is serving. **These are the numbers the other five
+matrix runs will be compared against**; the two runs below predate the harness and
+cannot be.
+
+| candidate | loaded | kernel | weights GiB | KV GiB | KV tokens | ctx @3 | card used GiB | left for aux GiB | TTFT cold/warm | answer s 1/3 | gen tok/s 1/3 | RAG answer s 1/3 | tools min-max | out-of-enum d/s/i | grounding | classifier JSON | reasoning | truncated |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `qwen36-35b-a3b-nvfp4` | yes | marlin-fallback | 19.55 | 4.9 | 207,842 | 69,280 | 25.76 | 6.08 | 0.405 / 0.076 | 0.272 / 0.356 | 207.3 / 174.8 | 0.715 / 0.371 | **0.8 to 0.867** | **15/3/0** | **1.0** | 1.0 | **0** | **0** |
+
+Budgets: latency 256 tokens, tools 512, grounding 512, classifier 128. Reasoning emitted:
+0 replies. Memory reproduces a third time to the decimal — 19.55 and 4.9 GiB on the same
+pin and image — which is what makes them profile numbers.
+
+#### The card from outside, and what the helpers really get
+
+New in this run: `nvidia-smi --query-gpu=memory.used`, read with the model loaded and
+idle (25.67 GiB) and again after the concurrent long-context case (25.76 GiB). The larger
+reading is the one below. It reconciles with vLLM's self-report, which is the point of
+taking it:
+
+| Line | GiB | Where it comes from |
+|---|---|---|
+| Card total | **31.84** | 32,607 MiB |
+| weights | 19.55 | vLLM |
+| non-torch overhead | 0.58 | vLLM |
+| CUDA graphs | 0.08 | vLLM |
+| KV cache | 4.90 | vLLM |
+| vLLM resident, expected | 25.11 | the four above |
+| **In use while serving, measured** | **25.76** | `nvidia-smi` |
+| Unaccounted — the Windows desktop | 0.65 | 25.76 − 25.11 |
+| **Card total minus that: what the helpers actually get** | **6.08** | 31.84 − 25.76 |
+| `aux_reserve_gib`, the estimate | 5.00 | declared |
+| **Margin over the estimate** | **1.08** | 6.08 − 5.00 |
+
+So the estimate holds, with about a gigabyte spare. Two caveats on that margin:
+
+1. **It is steady-state.** Peak activation (1.08 GiB by vLLM's profiler) is transient and
+   does not appear in either reading, so a burst can eat the whole margin. Two samples
+   are not a peak.
+2. **The 0.65 GiB is a desktop, and it moves.** It was 1.64 GiB before vLLM started on
+   2026-09-23. Open something on the Windows side and the margin narrows with it. On
+   `hub`, headless, this line disappears.
+
+#### Latency, and one figure that flatters
+
+Warm TTFT 0.076 s, a complete 40-token answer in 0.272 s alone and 0.356 s with three
+sessions at once. Generation runs 207 tokens/s alone and 175 per stream at three
+concurrent — a gentler drop than the 1.6× of 2026-09-23, on the same weights and the
+same kernel, which is itself a reminder of how much run-to-run spread there is here.
+
+**The RAG-sized numbers need reading carefully.** The prompt measured **10,107 tokens**
+(the estimate that sized the text said ~6,000 — the run records the server's own
+`prompt_tokens` for exactly this reason). Alone: TTFT 0.579 s, complete answer 0.715 s.
+At three concurrent: TTFT 0.169 s, answer 0.371 s — *faster*, which is not a load
+benefit. The single stream paid for the cold prefill of 10k tokens and the three
+concurrent streams then hit the prefix cache it left behind. **The honest figure for a
+cited answer on a cold prompt this size is 0.579 s to first token and 0.715 s to a whole
+answer**, and it is comfortably inside what a spoken reply can absorb.
+
+#### Tools: 0.8 to 0.867, and temperature 0 is not determinism
+
+Three passes over 15 cases: 12, 12 and 13 correct. No schema violations, no invented
+tools, no unparseable arguments across all 45 calls — the §7 bounds hold.
+
+**Pinning the temperature did not make the model repeatable.** Identical utterances went
+different ways between passes: `out-of-enum-fjoset` declined, substituted, declined;
+`out-of-enum-loft` substituted, substituted, declined. vLLM at `temperature: 0` is not
+bit-deterministic — batching and MoE expert routing vary — so *repetition*, not pinning,
+is what makes a tool score mean anything. Three passes was the right call and one pass
+would still mislead. Pinning is still worth keeping: it removes one source of spread
+rather than all of them.
+
+**Out-of-enum, 18 observations over six cases: 15 declined, 3 substituted, 0 invented.**
+Nothing ever emitted a value the schema would reject. Every failure was the dangerous
+kind instead — a schema-valid call in the wrong place:
+
+- `Slå på lyset på loftet` (the loft, not in the enum) → `set_indoor_light(area="hall")`,
+  twice in three passes.
+- `Skru på lyset i fjøset` (the barn) → `set_indoor_light(area="workshop")`, once.
+- The English `barn` case that substituted `workshop` on 2026-09-23 declined 3/3 here.
+  One draw, last time.
+
+This is the §3.1/§3.6 argument restated in measurements: the enum stops the model
+inventing an entity, and then the model picks a *real* one it was not asked about. Only
+the gateway's server-side scope and T2 confirmation stand between that and a valve.
+It is also why a spoken confirmation must read back the resolved arguments rather than
+the request (`docs/DECISIONS.md`, 2026-09-25).
+
+**The new in-enum controls immediately earned their place.** `Kan du skru på lyset i
+verkstedet?` — the workshop, *in* the enum, a request that should produce a call —
+produced **no call in 2 of 3 passes**. The polite Norwegian question form is being read
+as a question rather than a command. Which means `out-of-enum-stabburet` ("Kan du skru på
+lyset i stabburet?") passing 3/3 proves nothing about enum discipline: the model declines
+that phrasing whether or not the area exists. Without the control that would have been
+counted as the model correctly refusing an unknown area. Two consequences:
+
+- **For the classifier (§4, Q2 at M6):** the action-verb pre-pass needs the polite
+  interrogative forms Norwegian actually uses — `kan du`, `kunne du`, `vil du` — or real
+  requests will be classified as questions. Worth a case in the classifier set too.
+- **For scoring:** every out-of-enum case needs an in-enum twin in the same language and
+  the same phrasing. Four of six have one now; `garage` and the lawn zone do not.
+
+`Water the propagator for two hours` still declines 3/3 rather than clamping to the
+20-minute maximum or asking. Consistent, safe, and a worse experience than asking.
+
+**Grounding 6/6 and classifier 10/10 valid JSON**, both unchanged across three runs now.
+Same single classifier disagreement: one ambiguous utterance read as `action` where
+`question` was expected — which §4's safe default handles the other way round, so it is
+the harmless direction.
+
+#### Emitted profile (validated, not yet adopted)
+
+Pasted through `ModelProfile` before being written here: **valid**. weights + kv = 24.45
+GiB against vLLM's 26.11 GiB share, budget + aux = 29.45 against a 31.84 GiB card, and
+5.73 GiB left free for a 5.0 GiB reservation — with 6.08 GiB actually measured.
+
+```toml
+[profiles.qwen36_35b_a3b_nvfp4]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gib = 19.55
+kv_cache_gib = 4.9
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
+measured_by = "evals/2026-09-25T15-07-51Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+```
+
+Still not adopted: five matrix runs remain, and `aux_reserve_gib` is still an estimate.
 
 ### Run `evals/2026-09-23T16-13-25Z` — candidate A, KV cache `auto`, thinking disabled
 
@@ -333,7 +472,7 @@ settle it, load once with and once without the flag and compare the reported wei
 Same memory numbers, `measured_by = "evals/2026-09-22T17-39-18Z"`. Superseded because
 the quality half of this run was void, not because the numbers were wrong.
 
-## What the first run settled
+## What the first runs settled (2026-09-22 and 2026-09-23)
 
 Beyond the numbers, three things that were assumptions before:
 
@@ -346,27 +485,34 @@ Beyond the numbers, three things that were assumptions before:
    memory log lines, so the profile could not be emitted. Both are fixed and covered
    by tests built from the real log.
 
-### Operational notes for the next run
+### Operational notes
 
 - The checkpoint took 27 minutes to download (21.8 GiB) and the rate swung between
   ~90 MB and ~3 GB per minute. Weight load is 42 s, engine init 116 s, so a repeat run
   on a warm cache is ~3 minutes to serving.
 - The vLLM image is 30.5 GB unpacked, which is the larger disk cost on `C:`.
-- vLLM holds ~20 GB of VRAM from engine start, before any weights are loaded.
+- vLLM holds ~20 GiB of VRAM from engine start, before any weights are loaded.
 
 ## Decision
 
-_Pending, but candidate A now has a real result to beat:_ it fits with 5.73 GiB of the
-card outside vLLM — 0.73 GiB more than the helper models need — reproduces every part number and torque figure, returns a complete
-spoken answer in 0.41 s with three satellites talking at once, and needs thinking
+_Pending, but candidate A has a measured result to beat:_ it leaves **6.08 GiB** of the
+card free beside vLLM against a 5.0 GiB reservation, reproduces every part number and
+torque figure, answers in 0.356 s with three satellites talking at once and in 0.715 s on
+a cold 10k-token RAG prompt, breaks no schema bound in 45 tool calls, and needs thinking
 disabled to do any of it.
 
-Still required before a profile is adopted: `temperature: 0` in the harness, candidate
-A at `fp8` KV cache, and candidate B and the fallback at both dtypes. The chosen
-profile then goes here, in `docs/DECISIONS.md` and in `config/farmhub.example.toml`.
+Still required before a profile is adopted: candidate A at `fp8` KV cache, and candidate
+B and the fallback at both dtypes. The chosen profile then goes here, in
+`docs/DECISIONS.md` and in `config/farmhub.example.toml`.
 
-**One consequence for the application, whichever model wins:** FarmHub's own client
-must send `enable_thinking: false` (or whatever the chosen model's equivalent is). With
-thinking on, this model produced no usable answer inside a sane token budget, so this
-is a serving requirement rather than a tuning preference. It belongs in `modules/llm`
-and in the profile, and it is not implemented yet.
+**What the runs have already settled for the application**, whichever model wins:
+
+- FarmHub's client sends the thinking switch and the profile's temperature on every
+  request, both required profile fields. Implemented (`docs/DECISIONS.md`, 2026-09-25).
+- A tool score is a range over repeated passes, not a number: `temperature: 0` does not
+  make this stack repeatable.
+- The failure mode to design against is **substitution**, not invention. Every
+  out-of-enum failure so far was a schema-valid call in a real area nobody asked about,
+  which is a gateway and confirmation problem rather than a schema one.
+- The §4 classifier pre-pass must handle Norwegian polite interrogatives (`kan du …`), or
+  it will route real requests to the question path (Q2, M6).

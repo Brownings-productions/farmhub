@@ -163,7 +163,7 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
     entry["memory_used_gib_idle"] = backend.memory_used_gib()
     entry["usable_context_at_concurrency"] = startup.usable_context_at(CONCURRENT_SESSIONS)
     print(
-        f"  loaded: weights={startup.weights_gib} GB kv={startup.kv_cache_gib} GB "
+        f"  loaded: weights={startup.weights_gib} GiB kv={startup.kv_cache_gib} GiB "
         f"tokens={startup.kv_cache_tokens} kernel={entry['kernel']}"
     )
 
