@@ -14,15 +14,16 @@ Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISI
 
 | # | Section | Change |
 |---|---------|--------|
-| 1 | §2 Machines | The `nas` row was out of date. `nas` is now a **new TrueNAS build** for the corpus, media and backups, starting on integrated graphics with a transcoding GPU possible later. The old TrueNAS box becomes `tv`, a TV and emulation machine keeping the GTX 1060 until that card is upgraded; it is **not part of the FarmHub system**. Both rows keep "never an AI target". |
+| 1 | §2 Machines | The `nas` row was out of date. `nas` is now a **new TrueNAS build** for the corpus, media and backups, on a Xeon E5-1650 v4 — which has **no integrated graphics**, so it starts with no GPU at all and an Intel Arc A310 may be added later for transcoding. The old TrueNAS box becomes `tv`, a TV and emulation machine keeping the GTX 1060 until that card is upgraded; it is **not part of the FarmHub system**. Both rows keep "never an AI target". |
 | 2 | §2 Machines, §2 GPU assignment | **The hardware plan has two phases.** Phase 1 (now to ~Sept 2027) runs FarmHub on the **dev PC's RTX 5090**, sharing that card between the LLM and the helper models. Phase 2 is `hub` with an **RTX 5090 + RTX 3070 8 GB**. The 3070 is no longer "gone" (v1.3 row 1) and the second GPU is no longer "optional, decided after M1" (v1.3 row 2). |
 | 3 | §2 Machines | The `dev` row is no longer "not part of the running system": in Phase 1 it **is** the running system. An RTX 3070 cannot be added to it — the PSU will not take it — which is why Phase 1 shares one card. |
-| 4 | §2 GPU assignment | **A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub`; `kv_cache_gb` does not, and no dual-GPU profile is adopted until an eval run on `hub` produces it. Replaces v1.3's "everything it measures is about the card, not the chassis". |
+| 4 | §2 GPU assignment | **A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub`; `kv_cache_gib` does not, and no dual-GPU profile is adopted until an eval run on `hub` produces it. Replaces v1.3's "everything it measures is about the card, not the chassis". Every memory field is renamed to the unit it was always in — `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib` — and the list gains `chat_template_kwargs` and `temperature`, both required. |
 | 5 | §2 Machines, §2 Inference backend | The dev PC's card after the swap is an **RTX 5080 16 GB or a used RTX 4090 24 GB, undecided** (v1.3 row 7 named the 5080). Its role is the offline fallback; normally it uses vLLM on `hub` over the LAN. |
 | 6 | §2 Machines | States the rule plainly: **model inference runs on one machine at a time**, and `nas`, `tv` and `ha` never run it. |
 | 7 | §11 | Phase 1 means M1–M12 are all built and measured on the dev PC's 5090, so the shared card constrains M3, M4 and M9 as much as M1. The "nothing before M9 requires dedicated hardware" note is rewritten; §9's "no test may require a GPU" is unchanged. |
 | 8 | §2 GPU assignment | Drops the claim that overnight batch work is where the LLM can be stopped to make room. §8.4's contextual retrieval **needs** the local LLM to write its blurbs, so it is another tenant on the shared card, and taking serving offline overnight is not a decision this SPEC makes. |
-| 9 | §14 | **New Q9 (M1): Phase 1 uptime.** The dev PC is the running system for a year, but vLLM is started by hand and Windows reboots for updates. How both come back, and what a satellite hears while they are down, is unsettled. |
+| 9 | §14 | **New Q9 (M1): Phase 1 uptime.** The dev PC is the running system for a year, but vLLM is started by hand, Windows reboots for updates, and the machine is also used for gaming — which wants the card vLLM has reserved. How gaming and serving coexist, how both come back after a reboot, and what a satellite hears meanwhile, is unsettled. |
+| 10 | §2 Machines | The `ha` row lists the real options — **Home Assistant Green, an N100 mini PC, or a Pi 5 + NVMe** — and states that there is **one `ha` box and no redundancy pair**: resilience comes from the §10 hardware interlocks at the equipment, backups to `nas`, and a UPS. |
 
 ---
 
@@ -116,8 +117,8 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 | Host | Hardware | Role |
 |------|----------|------|
 | hub | Ubuntu 24.04, RTX 5090 32 GB + RTX 3070 8 GB (Phase 2; does not exist yet) | vLLM, FarmHub app, Postgres, Whisper, Piper, embeddings |
-| ha | N100 mini PC or Pi 5 + NVMe, Home Assistant OS | Home Assistant and all safety-critical automation |
-| nas (media) | New TrueNAS build, integrated graphics | Document corpus, media, backups. A transcoding GPU may be added later — **never an AI target** |
+| ha | Home Assistant Green, an N100 mini PC, or a Pi 5 + NVMe — Home Assistant OS | Home Assistant and all safety-critical automation. **One box, not a redundant pair** |
+| nas (media) | New TrueNAS build, Xeon E5-1650 v4 — **no GPU at first** (that CPU has no integrated graphics); an Intel Arc A310 may be added later for transcoding | Document corpus, media, backups. **Never an AI target**, the Arc included |
 | tv (console) | The current TrueNAS box repurposed, keeping the GTX 1060 until it is upgraded | TV and emulation. **Not part of the FarmHub system, and never an AI target** |
 | sat-* | Raspberry Pi 4/5 | Wyoming voice satellites: kitchen, barn, workshop |
 | dev | ClevatessPrime: Windows + WSL2 + Docker Desktop, RTX 5090 32 GB | **Phase 1: the runtime host.** Development, every milestone's measurements, and the running system until `hub` exists |
@@ -126,13 +127,15 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 
 Where §2 and §8 say `hub` — Piper, Whisper, Postgres, the app itself — read "the Phase 1 runtime host" until `hub` is built.
 
-**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1.
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1. It is not a dedicated card, either: the same machine is a Windows desktop that is also used for gaming, so the card is shared with a desktop compositor and sometimes wanted whole by something else — see §14 Q9.
 
 **Phase 2, `hub`.** A new build with an RTX 5090 32 GB **and** an RTX 3070 8 GB — decided, not optional. The 5090 then serves the LLM alone and the helpers move to the 3070. The 5090 is power-limited to ~450 W since the machine runs permanently: inference loses very little and it runs cooler and quieter.
 
 The 5090 moves from the dev PC to `hub` when `hub` is built. The dev PC then takes an **RTX 5080 16 GB or a used RTX 4090 24 GB — undecided**, settled at the swap.
 
 ha is a separate physical machine on purpose. Heating and pumps must keep working when the GPU box is down, being patched, or has thrown a driver fault. This is an architectural rule, not a preference. Never propose collapsing ha into hub.
+
+**There is one `ha` box, and no plan for a second.** A redundancy pair is not the answer here, because the failure that matters — a valve left open, a pump running dry — is contained at the equipment rather than in software. Resilience comes from three things instead: the §10 hardware interlocks and independent cutoffs at every irrigation valve and pump circuit, which work with `ha` powered off; configuration backed up to `nas`; and a UPS, so a brief outage is not a restart. Do not propose clustering Home Assistant, and do not make FarmHub depend on `ha` being reachable.
 
 ### GPU assignment
 
@@ -141,19 +144,26 @@ ha is a separate physical machine on purpose. Heating and pumps must keep workin
 **Phase 2 — two cards, and the 5090 serves the LLM and nothing else:**
 
 - `CUDA_VISIBLE_DEVICES=0` → vLLM, configured by a model profile (below).
-- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GB on the 3070's 8 GB.
+- `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GiB on the 3070's 8 GB — an estimate, see `aux_reserve_gib` below.
 
-Config carries per-model profiles: model id, `revision`, quantization, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gb`, `kv_cache_gb`, `aux_reserve_gb` and the chat-template switches the model needs. None of these is hard-coded.
+Config carries per-model profiles: `repo_id`, `revision`, `quantization`, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib`, `measured_by`, `chat_template_kwargs` and `temperature`. None of these is hard-coded.
+
+Every memory figure is **GiB** — the unit vLLM reports and the evaluation records — and the field names say so, so no reader has to guess whether a conversion happened.
+
+The last two are request parameters rather than memory, and both are **required**:
+
+- `chat_template_kwargs` is what every request must carry for this model to answer at all. For the M1 candidates that is `{ enable_thinking = false }`: with thinking on, Qwen3.6 spends the whole token budget reasoning and never reaches an answer, which scored 2 of 6 on part numbers by never finishing (`docs/MODEL_EVAL.md`). It lives in the profile because the next model may spell the switch differently. An empty table is allowed for a model that needs nothing, and startup warns.
+- `temperature` is the sampling setting the profile was measured at, sent whenever a caller names none. The server's default is not an answer: the first two evaluation runs took it, and each tool score was a single unreproducible draw.
 
 Rules that make "never silently OOM" keep teeth while one card is shared:
 
-- Every profile declares `aux_reserve_gb`, the memory the auxiliary models need: ~5 in Phase 1, **zero** in Phase 2, where they live on the other card.
-- Config validation rejects a profile whose `weights_gb + kv_cache_gb + aux_reserve_gb` exceeds the card, and one whose `gpu_memory_utilization` does not leave at least `aux_reserve_gb` free.
+- Every profile declares `aux_reserve_gib`, the memory the auxiliary models need: ~5 in Phase 1, **zero** in Phase 2, where they live on the other card. Until a helper model has actually been loaded and measured (M3, M4, M9), the Phase 1 figure is an **estimate**, and `docs/MODEL_EVAL.md` says so where it is used.
+- Config validation rejects a profile whose `weights_gib + kv_cache_gib + aux_reserve_gib` exceeds the card, and one whose `gpu_memory_utilization` does not leave at least `aux_reserve_gib` free.
 - **vLLM starts before the auxiliary models**, so its utilization fraction is computed against a known-free card rather than against whatever happened to load first.
-- **The budget numbers are measured, not estimated.** `weights_gb` and `kv_cache_gb` come from an evaluation run on the real card (§11 M1, `docs/MODEL_EVAL.md`), and a profile records the run that produced them. A profile carrying hand-written numbers is not a valid profile.
-- **A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub` — same card, same checkpoint — but `kv_cache_gb` does not: it is whatever is left once the helpers are on another card and no desktop is using the GPU. **No Phase 2 profile is adopted until an eval run on `hub` produces it.**
+- **The budget numbers are measured, not estimated.** `weights_gib` and `kv_cache_gib` come from an evaluation run on the real card (§11 M1, `docs/MODEL_EVAL.md`), and a profile records the run that produced them. A profile carrying hand-written numbers is not a valid profile.
+- **A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub` — same card, same checkpoint — but `kv_cache_gib` does not: it is whatever is left once the helpers are on another card and no desktop is using the GPU. **No Phase 2 profile is adopted until an eval run on `hub` produces it.**
 
-This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible. It is also deliberately incomplete: it counts weights and KV cache but not peak activation or CUDA graph memory, which live inside vLLM's share too (about 1.2 GiB on the measured profile, `docs/MODEL_EVAL.md`). Treat a profile that only just passes as one that has not been tried.
+This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible. The evaluation harness does read the card from outside — `nvidia-smi` while the model is serving — so how much is really left beside vLLM is a measured figure even though `aux_reserve_gib` is not; FarmHub itself does no such probe (NVML is not on the §12 list). It is also deliberately incomplete: it counts weights and KV cache but not peak activation or CUDA graph memory, which live inside vLLM's share too (about 1.2 GiB on the measured profile, `docs/MODEL_EVAL.md`). Treat a profile that only just passes as one that has not been tried.
 
 FP8 weights for a 30B-class model run to ~30 GB, which exceeds 0.90 × 32 GB before any auxiliary reservation is taken out. Sharing one card therefore needs a smaller quantization — see Models below.
 
@@ -688,4 +698,4 @@ Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Ho
 - **Q6 (M8): Voice confirmation.** The fixed-intent form in §3.3 ("confirm" / "bekreft" handled deterministically by HA, calling the confirm endpoint with the satellite's `device_id`) is provisional. Settle: reading the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions.
 - **Q7 (M12): Printer stack.** Moonraker, OctoPrint or PrusaLink. Their upload APIs can start a print (a `print` flag or an auto-start queue); the upload client must never use either, with a test.
 - **Q8 (M2): Audit sink composition.** Leaning yes: JSONL is the mandatory write-ahead record (a failed JSONL write denies the call), and Postgres is written as well with idempotent catch-up from JSONL after an outage, so a database outage does not deny every tool.
-- **Q9 (M1): Phase 1 uptime.** The dev PC is the running system for about a year (§2), but it is not run like a server: vLLM is started by hand (`deploy/vllm/vllm.sh`, `restart: "no"` on purpose so a Docker Desktop restart cannot silently reclaim the card), and Windows reboots for updates whenever it likes. Settle how vLLM and the FarmHub app come back after a reboot, and what a satellite hears while they are down — HA's own intents keep working (§3.2), so the answer may be "nothing, and FarmHub says it is unavailable", but that has to be chosen rather than discovered. To settle before the M1 end-to-end test through Home Assistant.
+- **Q9 (M1): Phase 1 uptime.** The dev PC is the running system for about a year (§2), but it is not run like a server: vLLM is started by hand (`deploy/vllm/vllm.sh`, `restart: "no"` on purpose so a Docker Desktop restart cannot silently reclaim the card), and Windows reboots for updates whenever it likes. The same machine is also used for **gaming**, which wants the whole 5090 that vLLM has reserved — so vLLM cannot simply be left running, and "started by hand" is partly deliberate. Settle how gaming and serving coexist (stop vLLM and lose FarmHub for the evening, cap `gpu_memory_utilization` low enough for both, or accept that the two do not overlap), how vLLM and the FarmHub app come back after a reboot, and what a satellite hears while they are down — HA's own intents keep working (§3.2), so the answer may be "nothing, and FarmHub says it is unavailable", but that has to be chosen rather than discovered. To settle before the M1 end-to-end test through Home Assistant.

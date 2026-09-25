@@ -7,7 +7,9 @@ runs still to do.** Candidate A loads and serves on the dev PC's RTX 5090, repro
 part numbers and torque figures perfectly with thinking disabled, and answers a spoken
 question in well under a second. No profile is adopted yet: the other five runs
 (candidate A at `fp8`, candidate B and the fallback at both dtypes) have not run, and
-one harness weakness remains open — see *Sampling is not pinned*.
+the harness has since changed in ways that make those runs comparable — sampling is now
+pinned, tool cases are repeated, and a RAG-sized prompt is timed. Candidate A will be
+re-run on the new harness before anything else.
 
 ## Why this exists
 
@@ -74,10 +76,14 @@ Each is run at `kv_cache_dtype` `auto` and `fp8`, so the matrix is six runs.
 
 | Metric | How | Why it decides anything |
 |---|---|---|
-| Memory fit | vLLM's own startup log: weights GiB, KV cache GiB and tokens | These are the numbers a profile must declare. 5 GB is held back for Whisper, BGE-M3 and the reranker, which share the card on the default single-GPU profile |
+| Memory fit | vLLM's own startup log: weights GiB, KV cache GiB and tokens | These are the numbers a profile must declare, in GiB. 5 GiB is held back for Whisper, BGE-M3 and the reranker, which share the card in Phase 1 (SPEC §2) — an **estimate**, unlike everything else here |
+| Card in use while serving | `nvidia-smi --query-gpu=memory.used`, read twice: model loaded and idle, then again after the concurrent long-context case | The outside view. vLLM's log is a self-report that cannot see the desktop, the helper models, or anything else on the card; `card_total − this` is what the helpers really have left |
 | Usable context | KV cache tokens ÷ 3 concurrent sessions | §1 serves 2–3 concurrent voice users; `max_model_len` alone flatters the result |
-| Time to first token | Streaming, cold prefix and warm prefix, then 3 concurrent | Answers are read aloud, so TTFT is what a person in a barn experiences. The cold/warm gap is the evidence prefix caching works (§2) |
-| Tool-call fidelity | Strict schemas mirroring §7: enums, bounded integers, explicit `required`, `additionalProperties: false` | Scored separately for schema violations, invented tools and false positives. A model that ignores the bounds makes the tool TOML decorative; one that acts on a question opens a valve |
+| Time to first token | Streaming, cold prefix and warm prefix, then 3 concurrent | The cold/warm gap is the evidence prefix caching works (§2) |
+| Time to a complete answer | Total generation seconds and tokens/s, at 1 and at 3 concurrent | What a person waiting in the barn actually experiences. Marlin's cost lands in generation, not TTFT, so TTFT alone hid it entirely |
+| Latency on a RAG-sized prompt | ~6,000 tokens of synthetic manual context, alone and at 3 concurrent | M4 will send prompts this size; a figure from a one-line question does not describe them |
+| Tool-call fidelity | Strict schemas mirroring §7: enums, bounded integers, explicit `required`, `additionalProperties: false`. **Every case run three times**, scored as a range | Scored separately for schema violations, invented tools and false positives. A model that ignores the bounds makes the tool TOML decorative; one that acts on a question opens a valve. Three passes because one draw decided the first two runs' scores |
+| Out-of-enum behaviour | Six cases naming an area or zone outside the enum, in English and Norwegian, bucketed **declined / substituted / invented** | Substituting a *different real area* passes validation and acts in the wrong room — a worse failure than inventing a value the schema rejects, and one a single "false positive" count hid. Paired with in-enum Norwegian controls using the same verbs, so a decline cannot be confused with failing at the language |
 | Part numbers and torque | Synthetic manual extracts, exact string match | `SKF 6205-2RS` and `SKF 6250-2RS` are equally fluent and one orders the wrong bearing. Includes a case whose answer is absent: inventing a figure scores as failure, because a wrong torque is worse than none |
 | Classifier JSON | The §4 structured call over Norwegian and English utterances | Validity is scored before accuracy: an invalid response routes to `question` by design, so it is safe but useless |
 
@@ -91,7 +97,7 @@ and figures are invented; nothing there should be believed outside this harness.
 The repeat of the run below, with `chat_template_kwargs {"enable_thinking": false}` on
 every request and larger token budgets. **This is the run with usable quality scores.**
 
-| candidate | loaded | kernel | weights GB | KV GB | KV tokens | ctx @3 | TTFT cold/warm | answer s 1/3 | gen tok/s 1/3 | tools | grounding | classifier JSON | reasoning | truncated |
+| candidate | loaded | kernel | weights GiB | KV GiB | KV tokens | ctx @3 | TTFT cold/warm | answer s 1/3 | gen tok/s 1/3 | tools | grounding | classifier JSON | reasoning | truncated |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `qwen36-35b-a3b-nvfp4` | yes | marlin-fallback | 19.55 | 4.9 | 207,842 | 69,280 | 0.472 / 0.074 | 0.225 / 0.41 | 253.6 / 155.9 | 0.75 | **1.0** | 1.0 | **0** | **0** |
 
@@ -99,9 +105,81 @@ Budgets: latency 256 tokens, tools 512, grounding 512, classifier 128. Reasoning
 emitted: 0 of 24 replies, so the parameter was honoured rather than ignored — the
 tripwire that makes the rest of the row meaningful.
 
-**Memory reproduces exactly.** Weights 19.55 GiB, KV cache 4.9 GiB, 207,842 tokens, on
-the same pin and the same image. Two runs a day apart agreeing to the decimal is the
-evidence that these numbers can be written into a profile.
+**Memory reproduces exactly**, and the whole card is accounted for below. Weights 19.55
+GiB, KV cache 4.9 GiB, 207,842 tokens, on the same pin and the same image. Two runs a day
+apart agreeing to the decimal is the evidence that these numbers can be written into a
+profile.
+
+#### Where the card goes — one table, GiB throughout
+
+Every figure is GiB, taken from the 2026-09-23 startup log. Earlier notes mixed GB with
+GiB and reported "roughly 6.8 GiB outside vLLM", which was wrong: that was 26.11 − 20.13,
+which is neither the free space nor anything else meaningful. The free space is 5.73.
+
+| Line | GiB | Where it comes from |
+|---|---|---|
+| Card total | **31.84** | 32,607 MiB, as the driver reports it |
+| In use before vLLM started | 1.64 | "Free memory on device (30.2/31.84 GiB)" — the Windows desktop, absent on `hub` |
+| vLLM's share at `gpu_memory_utilization = 0.82` | **26.11** | 0.82 × 31.84 |
+| ├ weights | 19.55 | "Model loading took 19.55 GiB memory" |
+| ├ non-torch overhead | 0.58 | 20.13 consumed − 19.55 weights |
+| ├ peak activation | 1.08 | memory profiler |
+| ├ CUDA graphs | 0.08 | "CUDA graph pool memory: 0.08 GiB (actual)" |
+| └ KV cache | 4.90 | "Available KV cache memory: 4.9 GiB" → 207,842 tokens |
+| **Sum inside vLLM's share** | **26.19** | 19.55 + 0.58 + 1.08 + 0.08 + 4.90 |
+| **Outside vLLM, for the helper models** | **5.73** | 31.84 − 26.11 |
+| `aux_reserve_gib` the profile declares | 5.00 | Whisper + BGE-M3 + reranker (SPEC §2) — **an estimate, see below** |
+| **Margin over the reservation** | **0.73** | 5.73 − 5.00 |
+
+Two things worth taking from that arithmetic:
+
+1. **The sum inside vLLM's share (26.19) slightly exceeds the share itself (26.11).**
+   vLLM sizes the KV cache from what is actually free, so it is self-consistent; what it
+   means is that the 0.82 fraction is not a hard ceiling on vLLM's footprint.
+2. **The config validator is deliberately optimistic.** It checks
+   `weights + kv ≤ utilization × card` — 24.45 ≤ 26.11 here — and ignores activation and
+   CUDA graphs, the 1.16 GiB between those two figures. So a profile that only just
+   passes validation has not been tried; vLLM's own preflight is the real guard. SPEC §2
+   now says this in as many words.
+3. **The 1.64 GiB the desktop holds is a Phase 1 cost.** On `hub`, headless and with the
+   helpers on the 3070, that comes back and `aux_reserve_gib` drops to 0 — which is
+   exactly why SPEC §2 says `kv_cache_gib` does not carry over between machines.
+
+#### `aux_reserve_gib = 5.0` is an estimate, and the only one here
+
+Every other number above was measured. This one was not. **No helper model has ever been
+loaded on this card and measured** — not faster-whisper, not BGE-M3, not
+bge-reranker-v2-m3. The 5 GiB is arithmetic over published model sizes, and it is doing
+real work: it is subtracted from vLLM's share, it is what `gpu_memory_utilization = 0.82`
+was chosen to leave free, and config validation rejects profiles against it. A profile
+can therefore pass every check and still not fit, if the estimate is low.
+
+Two things also make the estimate optimistic rather than conservative. The figure counts
+weights and nothing else — CTranslate2's and PyTorch's own allocator overhead, activation
+during a batch of chunks, and whatever fragmentation results from three processes taking
+and returning memory beside a long-lived vLLM are all outside it. And in Phase 1 the
+Windows desktop is on the same card (1.64 GiB here), which the 5 GiB does not cover
+either.
+
+**How to measure it, when the milestone arrives** — proposed, not built:
+
+1. **One model at a time, on an idle card.** Load faster-whisper `large-v3` at
+   `int8_float16`, read `nvidia-smi --query-gpu=memory.used` before and after, then
+   transcribe a 30-second clip and read it again under load. Repeat for BGE-M3 (embedding
+   a realistic batch of 32 chunks) and for the reranker (scoring 30 candidates). Three
+   numbers, each with an idle and a loaded reading.
+2. **Then all three together, beside a loaded vLLM**, because the sum of three separate
+   measurements is not the cost of running three at once. This is the number
+   `aux_reserve_gib` should carry: the peak of the whole helper set while the LLM is
+   serving.
+3. **Where it lands:** M3 owns BGE-M3 (embedding during ingest), M4 the reranker
+   (retrieval), M9 Whisper. Each of those milestones already has to measure what it costs
+   on the shared card (SPEC §2, Phase 1), so the natural shape is a small harness beside
+   `evals/` that each milestone adds one row to, and `aux_reserve_gib` becomes measured
+   the moment the third row exists.
+4. **Until then**, the run records `nvidia-smi` readings while serving, so "how much is
+   actually left beside vLLM" is a measured figure even while what the helpers *need*
+   is not. If the two ever cross — less left than the estimate assumes — the run says so.
 
 **Grounding 6/6.** Every part number, torque figure, capacity, filter designation and
 error code reproduced exactly, no wrong figure quoted from the surrounding context, and
@@ -136,18 +214,26 @@ violations, no invented tools, no unparseable arguments.
 **Classifier unchanged:** 10/10 valid JSON, 9/10 correct, the same ambiguous utterance
 classified `action` where `question` was expected.
 
-### Sampling is not pinned — read the tool score with that in mind
+### Neither run above pinned sampling — so 0.75 is one sample, not a figure
 
-Neither run set `temperature`, so both used the server default and the tool cases are
-not reproducible run to run. That is the most likely explanation for the
-`out-of-enum-area` case passing on 2026-09-22 and failing here: two samples of the same
-model, not a change in it. Grounding and the classifier came out identical or nearly so
-both times, so this affects the tool score most.
+Neither the 2026-09-22 nor the 2026-09-23 run set `temperature`, so both took the server
+default and neither tool score is reproducible. That is the most likely explanation for
+the `out-of-enum-area` case passing on 2026-09-22 and failing on 2026-09-23: two samples
+of the same weights, not a change in the model. Grounding and the classifier came out
+identical or nearly so both times, so the damage is concentrated in the tool score.
+**Read 0.75 as "6 of 8 on one draw", and do not compare it with any later run.**
 
-Before candidates B and the fallback are scored, the harness should send
-`temperature: 0` (and record it), so a difference between candidates is a difference
-between models. Until then, treat 0.75 as "6 to 8 of 8, with one sample" rather than a
-precise figure.
+The harness no longer works this way. It now sends `temperature: 0` and records it in the
+run header, repeats the tool cases three times and reports the score as a range with the
+per-case pass counts, and separates an out-of-enum refusal from a *substitution* — the
+`barn → workshop` failure above was scored as a plain miss, which hid that the model
+picked a different real area rather than declining. It also times a RAG-sized prompt,
+since a 6,000-token context is what M4 will actually send.
+
+None of that is retrofittable onto the two runs above, so candidate A is re-run on the
+new harness before candidate B or the fallback is scored. Until that run exists, the
+numbers to trust here are the memory figures and grounding, both of which reproduced
+across two runs; the tool score is a placeholder.
 
 ### Emitted profile (not yet adopted)
 
@@ -159,11 +245,12 @@ quantization = "modelopt_fp4"
 kv_cache_dtype = "auto"
 gpu_memory_utilization = 0.82
 max_model_len = 32768
-weights_gb = 19.55
-kv_cache_gb = 4.9
-aux_reserve_gb = 5.0
-card_total_gb = 31.8
+weights_gib = 19.55
+kv_cache_gib = 4.9
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
 measured_by = "evals/2026-09-23T16-13-25Z"
+chat_template_kwargs = { enable_thinking = false }
 ```
 
 ### Run `evals/2026-09-22T17-39-18Z` — candidate A, KV cache `auto`, thinking on (superseded)
@@ -173,7 +260,7 @@ measured_by = "evals/2026-09-23T16-13-25Z"
 - Text-only via `--language-model-only`; `--block-size 128`; `--gpu-memory-utilization 0.82`; `--max-model-len 32768`
 - 3 concurrent sessions assumed; 5.0 GB held back for Whisper, BGE-M3 and the reranker
 
-| candidate | loaded | kernel | weights GB | KV GB | KV tokens | ctx @3 | TTFT cold/warm | tools | grounding | classifier JSON |
+| candidate | loaded | kernel | weights GiB | KV GiB | KV tokens | ctx @3 | TTFT cold/warm | tools | grounding | classifier JSON |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `qwen36-35b-a3b-nvfp4` | yes | marlin-fallback | 19.55 | 4.9 | 207,842 | 69,280 | 0.396 / 0.082 | 0.75 | 0.33 † | 1.0 |
 
@@ -181,9 +268,8 @@ measured_by = "evals/2026-09-23T16-13-25Z"
 
 **Memory.** Weights 19.55 GiB, KV cache 4.9 GiB, peak activation 1.08 GiB, CUDA graphs
 0.08 GiB. vLLM's own summary: 20.13 GiB consumed (weights + non-torch) of the 26.11 GiB
-that `0.82` utilization allows, leaving roughly 6.8 GiB of the card outside vLLM —
-comfortably above the 5.0 GB auxiliary reservation the single-GPU profile needs.
-Budget: 19.55 + 4.9 + 5.0 = 29.45 GB against a 31.8 GB card.
+that `0.82` utilization allows. The free-space and budget figures first written here were
+wrong; the corrected arithmetic is the table under the 2026-09-23 run above.
 
 **Context.** 207,842 KV tokens is 69,280 per session at 3 concurrent, well beyond the
 32,768 `max_model_len` this run configured. vLLM reports 6.34× concurrency at 32K, so
@@ -270,8 +356,8 @@ Beyond the numbers, three things that were assumptions before:
 
 ## Decision
 
-_Pending, but candidate A now has a real result to beat:_ it fits with 6.8 GB of the
-card left over, reproduces every part number and torque figure, returns a complete
+_Pending, but candidate A now has a real result to beat:_ it fits with 5.73 GiB of the
+card outside vLLM — 0.73 GiB more than the helper models need — reproduces every part number and torque figure, returns a complete
 spoken answer in 0.41 s with three satellites talking at once, and needs thinking
 disabled to do any of it.
 

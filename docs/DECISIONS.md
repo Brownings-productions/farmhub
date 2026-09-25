@@ -186,7 +186,7 @@ Removed from SPEC §14. **In force (M1).**
 `evals/` lives outside `tests/` because it needs a real GPU and SPEC §9 forbids a test that does. It is run by hand; CI never touches it.
 
 - **Pins are checked before anything downloads.** A candidate whose `revision` is not a 40-character commit sha is refused and nothing is fetched. `--check` also reports when a pin has fallen behind upstream, so following a move is a decision rather than a surprise. This is the operational half of the §2 revision rule.
-- **The harness writes the `[profiles.*]` block.** `weights_gb` and `kv_cache_gb` come from vLLM's startup log and go straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
+- **The harness writes the `[profiles.*]` block.** `weights_gib` and `kv_cache_gib` come from vLLM's startup log, and `chat_template_kwargs` and `temperature` from what the request actually carried; all of it goes straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
 - A test asserts the emitted block is accepted by `ModelProfile`, so the two halves cannot drift apart without the suite noticing.
 - **The kernel actually selected is recorded**, not the one requested, because an NVFP4 checkpoint on sm_120 can fall back to Marlin W4A16 and the run would otherwise look like NVFP4.
 - **Unparsed numbers stay `None`, never 0.0.** A zero looks like a measurement.
@@ -233,11 +233,11 @@ The second run failed at device init with "UVA is not available". vLLM v0.29.0 t
 ### 2026-09-23: the hardware plan has two phases, and Phase 1 is the dev PC
 The plan is no longer "develop anywhere, then build `hub`". It is two named phases, and the first one lasts about a year.
 
-**Phase 1, now to roughly September 2027.** FarmHub is developed, measured **and run** on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine — the PSU will not take it — so the LLM and the helper models (faster-whisper, BGE-M3, the reranker, ~5 GB) share the one card, with `aux_reserve_gb ≈ 5`. This is the production profile for the next year, not a fallback and not a degradation, which is the part that matters for planning: it constrains **M3** (embedding while an LLM is loaded), **M4** (reranking on the same card) and **M9** (Whisper and Piper beside both) exactly as much as it constrains M1. Each of those milestones has to measure what it costs rather than assume there is room.
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured **and run** on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine — the PSU will not take it — so the LLM and the helper models (faster-whisper, BGE-M3, the reranker, ~5 GB) share the one card, with `aux_reserve_gib ≈ 5`. This is the production profile for the next year, not a fallback and not a degradation, which is the part that matters for planning: it constrains **M3** (embedding while an LLM is loaded), **M4** (reranking on the same card) and **M9** (Whisper and Piper beside both) exactly as much as it constrains M1. Each of those milestones has to measure what it costs rather than assume there is room.
 
-**Phase 2, `hub`.** RTX 5090 32 GB **plus** RTX 3070 8 GB, decided rather than optional. The 5090 then serves the LLM alone, the helpers move to the 3070, and `aux_reserve_gb` becomes 0. The dev PC takes an RTX 5080 16 GB or a used RTX 4090 24 GB — undecided, settled at the swap — and from then on talks to vLLM on `hub` over the LAN, keeping a small-model local profile as the offline fallback.
+**Phase 2, `hub`.** RTX 5090 32 GB **plus** RTX 3070 8 GB, decided rather than optional. The 5090 then serves the LLM alone, the helpers move to the 3070, and `aux_reserve_gib` becomes 0. The dev PC takes an RTX 5080 16 GB or a used RTX 4090 24 GB — undecided, settled at the swap — and from then on talks to vLLM on `hub` over the LAN, keeping a small-model local profile as the offline fallback.
 
-**A profile belongs to one machine.** `weights_gb` carries from the dev PC to `hub`, because it is the same card and the same checkpoint. `kv_cache_gb` does not: it is whatever is left once the helpers are elsewhere and no desktop is using the GPU. So **no Phase 2 profile is adopted until an eval run on `hub` produces it**, and the 2026-09-22/23 numbers are explicitly Phase 1 numbers.
+**A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub`, because it is the same card and the same checkpoint. `kv_cache_gib` does not: it is whatever is left once the helpers are elsewhere and no desktop is using the GPU. So **no Phase 2 profile is adopted until an eval run on `hub` produces it**, and the 2026-09-22/23 numbers are explicitly Phase 1 numbers.
 
 **Model inference runs on one machine at a time.** `nas`, `tv` and `ha` never run it, whatever GPU they hold. The only exception is wake-word detection on the satellites, which is a keyword spotter rather than a model FarmHub serves; §8.8 does not currently say where it runs and M9 settles it.
 
@@ -254,12 +254,28 @@ Both keep the old rule: **never an AI target.** Model inference runs on one mach
 
 Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4)**, accepted with the revision as a whole.
 
+### 2026-09-25: the profile carries its request parameters, and every memory field says GiB
+Two changes to `ModelProfile`, both from the M1 runs.
+
+**`chat_template_kwargs` and `temperature` are required profile fields**, sent by `modules/llm` on every request and used whenever a caller names no temperature of its own. Thinking-off is the reason for the first (see the entry below). Sampling is the reason for the second: the runs of 2026-09-22 and 2026-09-23 both took the server's default, so each tool score was one unreproducible draw and the two could not be compared with each other — one case flipped between them and nothing in either run could say why. A profile now states what it was measured at, the harness emits both fields from what the request actually carried, and an empty `chat_template_kwargs` is allowed but warned about. Neither is defaulted in code: a default nobody declared is exactly what produced the two incomparable runs.
+
+**Every memory field is renamed to the unit it was always in:** `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib`. vLLM reports GiB, the eval records GiB, the validator compares GiB — but the fields said `_gb`, and the first write-up of the measurements duly mixed the two bases and reported a figure that was neither (`docs/MODEL_EVAL.md`). No profile has been adopted yet, so nothing in use breaks. Part of SPEC v1.4's §2 field list. **Recorded (M1), implemented.**
+
 ### 2026-09-23: thinking mode is switched off for serving, not just for the eval
 With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
 
 So this is a serving requirement, not an eval detail. FarmHub's own client has to send it, or the first real voice question produces a truncated ramble; §1 answers are read aloud. **To implement at M1:** `modules/llm` sends it, and which switch a model needs belongs in the profile beside `quantization` — a future model may spell it differently.
 
 The eval harness also records whether a reply reasoned anyway, and warns, because the parameter is silently ignorable by a backend or a chat template, and a run that ignored it would otherwise look like a clean result. **Recorded (M1); the client change is still to do.**
+
+### 2026-09-25: a spoken confirmation reads back the gateway's resolved arguments
+A T2 confirmation prompt (§3.3) must state the arguments **the gateway resolved and stored**, not a paraphrase of what the person said. "Water the greenhouse benches for ten minutes — confirm?" is right; "shall I start the watering?" is not.
+
+The reason is measured rather than hypothetical. In the 2026-09-23 eval, "Turn on the light in the barn" produced `set_indoor_light(area="workshop")`: `barn` is not in the enum, so instead of declining the model substituted a *different real area*. Schema-valid, and the wrong room. A prompt built from the utterance, or from the model's own sentence, would have read back "the light" and been confirmed happily while the stored argument pointed somewhere else. The whole value of §3.3's "the arguments executed are the arguments stored in the PendingAction" is lost if the human confirms against a different set of words than the ones that will run.
+
+So the confirmation text is rendered from the PendingAction row — tool, area, duration, asset — by the gateway, never by the model, and it names each argument rather than summarising them. Where a value has no natural spoken form, the prompt says the value as stored rather than smoothing it.
+
+**Recorded (M5/M8).** M5 builds the gateway's policy checks and is where the rendering belongs; M8 builds the confirmation flow and is where it is tested, including the case where the resolved area differs from the area the person named. Ties into Q6, which settles the voice form.
 
 ### 2026-09-22: the NVFP4 Marlin fallback on sm_120 is confirmed, not theoretical
 SPEC §2 warned that NVFP4 on the RTX 5090 could fall back to Marlin W4A16. The first loading run of `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a` on `vllm/vllm-openai:v0.29.0` confirms it for both paths:

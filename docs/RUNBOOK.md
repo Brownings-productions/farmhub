@@ -62,6 +62,43 @@ would have followed it on the next pull.
 Paste the result into `VLLM_REVISION`, and into the matching FarmHub profile. If a sha
 you already pinned has moved, find out what changed before following it.
 
+### The serving profile: what every field means
+
+A `[profiles.*]` block is a record of a measured evaluation run, not a set of knobs to
+tune. **The evals harness writes it; nobody types it** (`docs/MODEL_EVAL.md`), and
+`config check` refuses a profile that breaks any of the rules below.
+
+Memory fields are **GiB** — the unit vLLM reports and the eval records — which is why
+they are named `_gib`. No conversion happens anywhere:
+
+| Field | Comes from | Notes |
+|---|---|---|
+| `weights_gib` | vLLM's startup log | Carries over to `hub`: same card, same checkpoint |
+| `kv_cache_gib` | vLLM's startup log | Does **not** carry over: it is whatever was left on this machine (SPEC §2) |
+| `aux_reserve_gib` | declared | Whisper + BGE-M3 + reranker beside vLLM. ~5 in Phase 1, 0 on `hub`. Still an **estimate** — no helper model has been measured yet |
+| `card_total_gib` | `nvidia-smi` | 31.84 for the RTX 5090 (32,607 MiB) |
+
+Validation rejects `weights_gib + kv_cache_gib + aux_reserve_gib` over the card, a
+`gpu_memory_utilization` that does not leave `aux_reserve_gib` free, and
+`weights_gib + kv_cache_gib` over vLLM's own share. That last check ignores peak
+activation and CUDA graph memory (~1.2 GiB on the measured profile), so **a profile that
+only just passes has not actually been tried** — vLLM's own preflight is the real guard.
+
+Two fields are request parameters rather than memory, and both are required:
+
+- **`chat_template_kwargs`** is sent on every request, including the classifier's. For
+  the M1 candidates it is `{ enable_thinking = false }`. Leave thinking on and the model
+  spends its whole token budget reasoning: part-number grounding scored 2 of 6 by never
+  reaching an answer, and what a satellite reads aloud is a truncated ramble. It lives in
+  the profile because the next model may spell the switch differently. An empty table is
+  allowed and startup warns; a **missing** key fails startup.
+- **`temperature`** is what the profile was measured at, used whenever the caller names
+  none. Omitting it would mean the backend's own default, which is how two eval runs
+  produced tool scores that could not be compared with each other.
+
+Both are printed by `config check` and logged at startup, so a running FarmHub says on
+its first lines how it is sampling.
+
 ### Checkpoint cache and disk
 
 `HF_CACHE_DIR` must point inside the Linux filesystem (`~/.cache/huggingface`), never at
