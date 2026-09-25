@@ -69,7 +69,16 @@ def build_app(
     # ``backend`` is the composition root's one injection point: production builds the
     # real client, tests hand in a double, and nothing below has to know which.
     if backend is None:
-        backend = OpenAICompatBackend(settings.llm, log)
+        # The profile decides what every request must carry (thinking off, for the M1
+        # models). Taken here rather than inside the client, so the client never has to
+        # know what a profile is.
+        profile = settings.active_profile()
+        backend = OpenAICompatBackend(
+            settings.llm,
+            log,
+            chat_template_kwargs=profile.chat_template_kwargs if profile else None,
+            temperature=profile.temperature if profile else None,
+        )
     ctx = AppContext(
         settings=settings,
         log=log,

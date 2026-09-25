@@ -354,3 +354,128 @@ async def test_the_shared_client_still_works_after_a_degraded_start() -> None:
 
     await registry.shutdown()
     await backend.aclose()
+
+
+# --- the thinking switch reaches every call (docs/DECISIONS.md 2026-09-23) -------------
+
+
+def capture_backend(
+    response: httpx2.Response,
+    seen: dict[str, Any],
+    *,
+    switches: dict[str, Any] | None = None,
+    temperature: float | None = 0.0,
+) -> OpenAICompatBackend:
+    def capture(request: httpx2.Request) -> httpx2.Response:
+        seen.update(json.loads(request.content))
+        return response
+
+    client = httpx2.AsyncClient(transport=httpx2.MockTransport(capture))
+    return OpenAICompatBackend(
+        LlmSettings(model=MODEL, max_retries=0),
+        structlog.get_logger("test"),
+        chat_template_kwargs=switches if switches is not None else {"enable_thinking": False},
+        temperature=temperature,
+        http_client=client,
+    )
+
+
+async def test_chat_sends_the_profiles_chat_template_kwargs() -> None:
+    """With thinking left on, the model reasons instead of answering (MODEL_EVAL.md)."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(httpx2.Response(200, json=completion_body("8,5 liter")), seen)
+    await backend.chat([ChatMessage("user", "hei")])
+    assert seen["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+async def test_structured_sends_the_chat_template_kwargs_too() -> None:
+    """The §4 classifier is the call least able to afford a preamble."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(
+        httpx2.Response(200, json=completion_body('{"kind": "question"}')), seen
+    )
+    await backend.structured([ChatMessage("user", "hei")], {"type": "object"})
+    assert seen["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+async def test_stream_chat_sends_the_chat_template_kwargs_too() -> None:
+    seen: dict[str, Any] = {}
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "ja"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    payload = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    backend = capture_backend(
+        httpx2.Response(200, text=payload, headers={"content-type": "text/event-stream"}), seen
+    )
+    assert [d async for d in backend.stream_chat([ChatMessage("user", "hei")])] == ["ja"]
+    assert seen["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+async def test_a_backend_with_no_profile_sends_no_extra_body() -> None:
+    """Ollama and the test double have no measured profile, and need no switches."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(httpx2.Response(200, json=completion_body("hei")), seen, switches={})
+    await backend.chat([ChatMessage("user", "hei")])
+    assert "chat_template_kwargs" not in seen
+
+
+# --- the profile's temperature reaches every call (docs/DECISIONS.md 2026-09-25) -------
+
+
+async def test_chat_sends_the_profiles_temperature() -> None:
+    """Without it the backend's default applies, and a default nobody declared is how
+    two eval runs produced tool scores that could not be compared (MODEL_EVAL.md)."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(
+        httpx2.Response(200, json=completion_body("8,5 liter")), seen, temperature=0.0
+    )
+    await backend.chat([ChatMessage("user", "hei")])
+    assert seen["temperature"] == 0.0
+
+
+async def test_structured_sends_the_profiles_temperature() -> None:
+    """§4 routes an unparseable answer to `question`, so a sampled classifier is a
+    pipeline that changes its mind between identical utterances."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(
+        httpx2.Response(200, json=completion_body('{"kind": "question"}')), seen, temperature=0.0
+    )
+    await backend.structured([ChatMessage("user", "hei")], {"type": "object"})
+    assert seen["temperature"] == 0.0
+
+
+async def test_stream_chat_sends_the_profiles_temperature() -> None:
+    seen: dict[str, Any] = {}
+    chunks = [
+        {"choices": [{"index": 0, "delta": {"content": "ja"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    payload = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+    backend = capture_backend(
+        httpx2.Response(200, text=payload, headers={"content-type": "text/event-stream"}),
+        seen,
+        temperature=0.0,
+    )
+    assert [d async for d in backend.stream_chat([ChatMessage("user", "hei")])] == ["ja"]
+    assert seen["temperature"] == 0.0
+
+
+async def test_an_explicit_temperature_beats_the_profiles() -> None:
+    """A caller that needs a different setting is not silently overridden."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(
+        httpx2.Response(200, json=completion_body("hei")), seen, temperature=0.0
+    )
+    await backend.chat([ChatMessage("user", "hei")], temperature=0.7)
+    assert seen["temperature"] == 0.7
+
+
+async def test_a_backend_with_no_profile_sends_no_temperature() -> None:
+    """Ollama and the test double keep whatever default they have."""
+    seen: dict[str, Any] = {}
+    backend = capture_backend(
+        httpx2.Response(200, json=completion_body("hei")), seen, temperature=None
+    )
+    await backend.chat([ChatMessage("user", "hei")])
+    assert "temperature" not in seen

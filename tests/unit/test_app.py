@@ -47,3 +47,41 @@ async def test_default_app_denies_every_call_because_no_audit_sink_exists() -> N
     assert outcome.decision is Decision.DENIED
     assert tool.calls == []
     await app.registry.shutdown()
+
+
+def test_the_composition_root_hands_the_profiles_switches_to_the_backend() -> None:
+    """The profile decides what every request carries (docs/DECISIONS.md 2026-09-23).
+
+    Checked here rather than only in the client, because this wiring is the part that
+    would silently go missing: the client would keep working and answer with reasoning.
+    """
+    settings = Settings(
+        llm={"profile": "primary"},
+        profiles={
+            "primary": {
+                "repo_id": "nvidia/Qwen3.6-35B-A3B-NVFP4",
+                "revision": "1355db6a052410cfd62085d94b58866fd0f2c3c5",
+                "quantization": "modelopt_fp4",
+                "kv_cache_dtype": "auto",
+                "gpu_memory_utilization": 0.82,
+                "max_model_len": 32768,
+                "weights_gib": 19.55,
+                "kv_cache_gib": 4.9,
+                "aux_reserve_gib": 5.0,
+                "card_total_gib": 31.84,
+                "measured_by": "evals/2026-09-23T16-13-25Z",
+                "chat_template_kwargs": {"enable_thinking": False},
+                "temperature": 0.0,
+            }
+        },
+    )
+    app = build_app(settings)
+    assert app.backend.chat_template_kwargs == {"enable_thinking": False}
+    assert app.backend.temperature == 0.0
+
+
+def test_a_backend_built_without_a_profile_carries_no_switches() -> None:
+    backend = build_app(Settings()).backend
+    assert backend.chat_template_kwargs == {}
+    # No profile means no claim about sampling, so the backend's default stands.
+    assert backend.temperature is None

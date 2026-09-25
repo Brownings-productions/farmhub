@@ -65,13 +65,22 @@ health_interval_s = 30.0
 # evals harness emits this block; `measured_by` names the run that produced the
 # numbers, and a profile without one is rejected.
 #
+# Every memory figure is GiB, the unit vLLM reports and the eval records. Hence the
+# _gib suffix: no conversion happens anywhere.
+#
 # Validation at startup:
 #   - revision must be a 40-character commit sha. A tag is not a pin: one NVFP4
 #     upload of Qwen3.6-35B-A3B was silently replaced with weights that loop.
-#   - weights_gb + kv_cache_gb + aux_reserve_gb must fit on the card.
-#   - gpu_memory_utilization must leave aux_reserve_gb free for Whisper, BGE-M3 and
-#     the reranker, which share the 5090 on the default single-GPU profile.
-#   - weights_gb + kv_cache_gb must fit inside vLLM's own share of the card.
+#   - weights_gib + kv_cache_gib + aux_reserve_gib must fit on the card.
+#   - gpu_memory_utilization must leave aux_reserve_gib free for Whisper, BGE-M3 and
+#     the reranker, which share the card in Phase 1 (SPEC §2).
+#   - weights_gib + kv_cache_gib must fit inside vLLM's own share of the card. This
+#     check ignores peak activation and CUDA graph memory (~1.2 GiB on the measured
+#     profile), so a profile that only just passes has not actually been tried.
+#   - chat_template_kwargs must be present. It may be empty for a model that needs no
+#     switches, and startup then warns.
+#   - temperature must be present. The backend's own default is not an answer: the first
+#     two eval runs took it and neither tool score was reproducible.
 #
 # The numbers below are illustrative only. Replace them with an evals run before use.
 #
@@ -82,8 +91,18 @@ health_interval_s = 30.0
 # kv_cache_dtype = "auto"          # "auto" or "fp8"; M1 measures both (SPEC §2)
 # gpu_memory_utilization = 0.82
 # max_model_len = 32768
-# weights_gb = 17.5                # measured
-# kv_cache_gb = 8.0                # measured
-# aux_reserve_gb = 5.0             # 0.0 on the optional dual-GPU profile
-# card_total_gb = 31.8             # RTX 5090, as the driver reports it
+# weights_gib = 17.5                # measured
+# kv_cache_gib = 8.0                # measured
+# aux_reserve_gib = 5.0             # estimate: ~5 in Phase 1, 0.0 on hub's two cards
+# card_total_gib = 31.84            # RTX 5090: 32,607 MiB as the driver reports it
 # measured_by = "evals/2026-09-20T12-00-00Z"
+#
+# Sent on every request (modules/llm). Required, because with thinking left on this
+# model spends its whole token budget reasoning and the answer never arrives — it
+# scored 2 of 6 on part numbers by never finishing (docs/MODEL_EVAL.md). A future model
+# may spell the switch differently, which is why it lives in the profile.
+# chat_template_kwargs = { enable_thinking = false }
+#
+# Sampling, sent whenever a caller names none. What the evals run measured, so the app
+# serves the model the way it was scored.
+# temperature = 0.0
