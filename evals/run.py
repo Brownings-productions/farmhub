@@ -31,10 +31,16 @@ DATA = Path(__file__).resolve().parent / "data" / "candidates.json"
 LOGS = Path(__file__).resolve().parent / "results" / "logs"
 
 SERVED_NAME = "farmhub-eval"
-# Whisper, BGE-M3 and the reranker share the 5090 on the default single-GPU profile
-# (SPEC §2). Held back from vLLM's share so the measured numbers describe the real
-# arrangement, not a card with nothing else on it.
-AUX_RESERVE_GB = 5.0
+# Whisper, BGE-M3 and the reranker share the 5090 in Phase 1 (SPEC §2), the
+# arrangement FarmHub runs on until hub exists. Held back from vLLM's share so the
+# measured numbers describe the real arrangement, not a card with nothing else on it.
+#
+# This one figure is an ESTIMATE, unlike everything else the run records: no helper
+# model has been loaded and measured yet (M3, M4 and M9 do that). It is carried in the
+# results as such, and `nvidia-smi` readings taken while serving say how much the card
+# really has left beside vLLM — which is the number that will confirm or refute it.
+AUX_RESERVE_GIB = 5.0
+AUX_RESERVE_IS_ESTIMATE = True
 # SPEC §1 serves 2-3 concurrent voice users. The usable context is the KV cache
 # divided by this, not the configured max_model_len.
 CONCURRENT_SESSIONS = 3
@@ -57,7 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--load-timeout", type=float, default=1800.0)
-    parser.add_argument("--card-total-gb", type=float, default=31.8)
+    parser.add_argument("--card-total-gib", type=float, default=31.84)
     return parser.parse_args(argv)
 
 
@@ -151,9 +157,13 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
 
     entry["loaded"] = True
     entry["served_models"] = backend.served_models(args.port)
+    # The outside view of the card, taken twice: once with the model loaded and idle,
+    # once after the concurrent long-context case, which is the heaviest thing the run
+    # does. The larger of the two is what "in use while serving" means.
+    entry["memory_used_gib_idle"] = backend.memory_used_gib()
     entry["usable_context_at_concurrency"] = startup.usable_context_at(CONCURRENT_SESSIONS)
     print(
-        f"  loaded: weights={startup.weights_gb} GB kv={startup.kv_cache_gb} GB "
+        f"  loaded: weights={startup.weights_gib} GB kv={startup.kv_cache_gib} GB "
         f"tokens={startup.kv_cache_tokens} kernel={entry['kernel']}"
     )
 
@@ -163,13 +173,35 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
         entry["scoring_error"] = f"{type(exc).__name__}: {exc}"
         print(f"  scoring failed: {exc}")
     finally:
+        # Read before the container goes down, or it measures an empty card.
+        entry["memory_used_gib_after_scoring"] = backend.memory_used_gib()
         backend.down()
 
-    entry["aux_reserve_gb"] = AUX_RESERVE_GB
+    readings = [
+        value
+        for value in (entry.get("memory_used_gib_idle"), entry.get("memory_used_gib_after_scoring"))
+        if value is not None
+    ]
+    entry["memory_used_gib_while_serving"] = max(readings) if readings else None
+    if entry["memory_used_gib_while_serving"] is not None:
+        left = round(args.card_total_gib - entry["memory_used_gib_while_serving"], 2)
+        entry["card_left_for_aux_gib"] = left
+        print(
+            f"  card in use while serving: {entry['memory_used_gib_while_serving']} GiB, "
+            f"leaving {left} GiB beside vLLM (aux_reserve estimate {AUX_RESERVE_GIB})"
+        )
+        if left < AUX_RESERVE_GIB:
+            print(
+                "  WARNING: less is left than aux_reserve_gib assumes, so the helper "
+                "models do not fit beside this profile as configured."
+            )
+    entry["aux_reserve_gib"] = AUX_RESERVE_GIB
+    entry["aux_reserve_is_estimate"] = AUX_RESERVE_IS_ESTIMATE
     # Recorded so a run states its own request settings: thinking was asked to be off,
     # and how many replies reasoned anyway despite that. A backend that ignores the
     # parameter cannot then pass as a clean result (docs/MODEL_EVAL.md).
     entry["chat_template_kwargs"] = dict(cases_common.CHAT_TEMPLATE_KWARGS)
+    entry["temperature"] = cases_common.TEMPERATURE
     entry["max_completion_tokens"] = {
         name: (entry.get(name) or {}).get("max_completion_tokens")
         for name in ("latency", "tools", "grounding", "classifier")
@@ -208,15 +240,20 @@ def main(argv: list[str] | None = None) -> int:
     result: dict[str, Any] = {
         "run_id": identifier,
         "environment": {"vllm_image": backend.image_tag(), **backend.driver_info()},
-        "aux_reserve_gb": AUX_RESERVE_GB,
+        "aux_reserve_gib": AUX_RESERVE_GIB,
+        "aux_reserve_is_estimate": AUX_RESERVE_IS_ESTIMATE,
         "concurrent_sessions": CONCURRENT_SESSIONS,
-        "card_total_gb": args.card_total_gb,
+        "card_total_gib": args.card_total_gib,
+        # Sampling belongs in the run header: without it a score cannot be compared with
+        # another run's, which is what the first two runs learned the hard way.
+        "temperature": cases_common.TEMPERATURE,
+        "tool_repeats": tools.REPEATS,
         "candidates": [],
     }
 
     for candidate in candidates:
         entry = run_one(candidate, args)
-        entry["profile_toml"] = report.profile_toml(entry, identifier, args.card_total_gb)
+        entry["profile_toml"] = report.profile_toml(entry, identifier, args.card_total_gib)
         result["candidates"].append(entry)
 
     path = report.save(result, identifier)

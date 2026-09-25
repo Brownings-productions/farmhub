@@ -46,6 +46,7 @@ class Stream:
     completion_tokens: int | None
     truncated: bool
     reasoning: str | None
+    prompt_tokens: int | None = None
 
     @property
     def tokens_per_s(self) -> float | None:
@@ -58,13 +59,20 @@ class Stream:
         return (self.completion_tokens - 1) / generating
 
 
-async def _stream(client: httpx.AsyncClient, model: str, prefix: str, prompt: str) -> Stream:
-    """Stream one answer to completion, timing the first token and the last."""
+async def _stream(
+    client: httpx.AsyncClient, model: str, prefix: str, prompt: str, *, context: str | None = None
+) -> Stream:
+    """Stream one answer to completion, timing the first token and the last.
+
+    ``context`` is retrieved manual text, prepended to the user turn the way the §4
+    pipeline will at M4.
+    """
+    user = prompt if context is None else f"Context:\n{context}\n\nQuestion: {prompt}"
     body = common.payload(
         model,
         [
             {"role": "system", "content": prefix},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user},
         ],
         max_completion_tokens=MAX_TOKENS,
         stream=True,
@@ -75,6 +83,7 @@ async def _stream(client: httpx.AsyncClient, model: str, prefix: str, prompt: st
     started = time.perf_counter()
     ttft: float | None = None
     tokens: int | None = None
+    prompt_tokens: int | None = None
     finish_reason: str | None = None
     text_parts: list[str] = []
 
@@ -92,6 +101,7 @@ async def _stream(client: httpx.AsyncClient, model: str, prefix: str, prompt: st
                 continue
             if usage := chunk.get("usage"):
                 tokens = usage.get("completion_tokens")
+                prompt_tokens = usage.get("prompt_tokens")
             for choice in chunk.get("choices") or []:
                 content = (choice.get("delta") or {}).get("content")
                 if content:
@@ -109,6 +119,7 @@ async def _stream(client: httpx.AsyncClient, model: str, prefix: str, prompt: st
         completion_tokens=tokens,
         truncated=finish_reason == "length",
         reasoning=common.reasoning_in({"content": answer}),
+        prompt_tokens=prompt_tokens,
     )
 
 
@@ -118,8 +129,10 @@ def _summary(streams: list[Stream]) -> dict[str, Any]:
     totals = [s.total_s for s in streams]
     rates = [r for r in (s.tokens_per_s for s in streams) if r is not None]
     counts = [s.completion_tokens for s in streams if s.completion_tokens is not None]
+    prompts = [s.prompt_tokens for s in streams if s.prompt_tokens is not None]
     return {
         "streams": len(streams),
+        "prompt_tokens_median": round(statistics.median(prompts)) if prompts else None,
         "ttft_s_median": round(statistics.median(ttfts), 3) if ttfts else None,
         "ttft_s_max": round(max(ttfts), 3) if ttfts else None,
         "answer_s_median": round(statistics.median(totals), 3) if totals else None,
@@ -152,7 +165,24 @@ async def run(base_url: str, model: str, timeout_s: float = 300.0) -> dict[str, 
         )
         together = [s for s in gathered if isinstance(s, Stream)]
 
-    every = [cold, *warm, *together]
+        # A RAG-sized turn: thousands of tokens of retrieved manual, alone and under the
+        # same concurrency. Prefill dominates, which is where Marlin's cost lands.
+        long_context = data.get("long_context")
+        long_single: list[Stream] = []
+        long_together: list[Stream] = []
+        if long_context is not None:
+            question, context = long_context["question"], long_context["context"]
+            long_single = [await _stream(client, model, prefix, question, context=context)]
+            long_gathered = await asyncio.gather(
+                *(
+                    _stream(client, model, prefix, question, context=context)
+                    for _ in range(concurrent)
+                ),
+                return_exceptions=True,
+            )
+            long_together = [s for s in long_gathered if isinstance(s, Stream)]
+
+    every = [cold, *warm, *together, *long_single, *long_together]
     return {
         "max_completion_tokens": MAX_TOKENS,
         # Flat, beside the other cases' counters, because the run-level total reads this
@@ -171,4 +201,7 @@ async def run(base_url: str, model: str, timeout_s: float = 300.0) -> dict[str, 
         # The new half: a whole answer, alone and under load.
         "single": _summary(warm),
         "at_concurrency": _summary(together),
+        # The same, for a retrieval-sized prompt (M4's shape, measured at M1).
+        "long_context_single": _summary(long_single) if long_single else None,
+        "long_context_at_concurrency": _summary(long_together) if long_together else None,
     }

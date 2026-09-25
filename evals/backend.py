@@ -62,8 +62,8 @@ KERNEL_HINTS = (
 class Startup:
     """What vLLM reported about itself while coming up."""
 
-    weights_gb: float | None = None
-    kv_cache_gb: float | None = None
+    weights_gib: float | None = None
+    kv_cache_gib: float | None = None
     kv_cache_tokens: int | None = None
     max_concurrency: float | None = None
     kernel_lines: list[str] = field(default_factory=list)
@@ -136,6 +136,31 @@ def driver_info() -> dict[str, str]:
     return {"gpu": name, "driver": driver, "memory_total": memory}
 
 
+MIB_PER_GIB = 1024.0
+
+
+def memory_used_gib() -> float | None:
+    """What the card actually holds right now, in GiB, or None if unreadable.
+
+    vLLM's startup log is a self-report: it accounts for its own share and knows
+    nothing about the desktop, the helper models, or anything else on the card. This is
+    the outside view, and the difference between it and `card_total_gib` is what the
+    auxiliary models really have left (SPEC §2, Phase 1).
+    """
+    result = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        return round(float(result.stdout.strip().splitlines()[0]) / MIB_PER_GIB, 2)
+    except ValueError:
+        return None
+
+
 def down() -> None:
     _compose("down", "--remove-orphans")
 
@@ -173,9 +198,9 @@ def parse_startup(log: str, log_path: Path) -> Startup:
     startup = Startup(log_path=str(log_path))
 
     if match := WEIGHTS.search(log):
-        startup.weights_gb = float(match.group(1) or match.group(2))
+        startup.weights_gib = float(match.group(1) or match.group(2))
     if match := KV_CACHE_GIB.search(log):
-        startup.kv_cache_gb = float(match.group(1) or match.group(2))
+        startup.kv_cache_gib = float(match.group(1) or match.group(2))
     if match := KV_CACHE_TOKENS.search(log):
         startup.kv_cache_tokens = int(match.group(1).replace(",", ""))
     if match := MAX_CONCURRENCY.search(log):

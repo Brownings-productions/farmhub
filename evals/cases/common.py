@@ -21,6 +21,12 @@ from typing import Any
 # classifier calls, so one run means one mode throughout.
 CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
+# Greedy decoding. The first two runs left this to the server default and the tool score
+# moved between them — one case passed on 2026-09-22 and failed on 2026-09-23 on the
+# same weights. A difference between candidates has to be a difference between models,
+# not between samples, so sampling is pinned and the value is recorded in the run.
+TEMPERATURE = 0.0
+
 # Reasoning as it actually appeared: vLLM emits a `reasoning_content` field when a
 # reasoning parser is configured, and otherwise the reasoning lands in `content`.
 # These are the openers seen in the 2026-09-22 run plus the usual tag forms.
@@ -42,6 +48,7 @@ def payload(
         "model": model,
         "messages": messages,
         "max_completion_tokens": max_completion_tokens,
+        "temperature": TEMPERATURE,
         "chat_template_kwargs": CHAT_TEMPLATE_KWARGS,
     }
     body.update(extra)
