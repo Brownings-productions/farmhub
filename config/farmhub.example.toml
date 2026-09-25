@@ -88,7 +88,11 @@ health_interval_s = 30.0
 # repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 # revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
 # quantization = "modelopt_fp4"
-# kv_cache_dtype = "auto"          # "auto" or "fp8"; M1 measures both (SPEC §2)
+# kv_cache_dtype = "auto"          # declared, never assumed (SPEC §2). M1 measures
+#                                  # "auto" only: at auto the KV cache already holds
+#                                  # twice max_model_len per session, so fp8 would buy
+#                                  # room this system does not need at a quality risk
+#                                  # (docs/DECISIONS.md, 2026-09-25)
 # gpu_memory_utilization = 0.82
 # max_model_len = 32768
 # weights_gib = 17.5                # measured

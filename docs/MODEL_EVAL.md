@@ -2,12 +2,12 @@
 
 Which model FarmHub serves, and the measurements behind that choice.
 
-**Status: candidate A measured on the current harness (2026-09-25); 5 of 6 matrix runs
-still to do.** Candidate A loads and serves on the dev PC's RTX 5090, reproduces every
-part number and torque figure with thinking disabled, and answers a spoken question in
-well under a second — including on a 10,000-token RAG prompt. Its memory numbers have now
-reproduced across three runs. No profile is adopted yet: candidate A at `fp8`, and
-candidate B and the fallback at both dtypes, have not run. Read the 2026-09-25 run;
+**Status: candidate A measured; candidate B and the fallback still to run.** Candidate A
+loads and serves on the dev PC's RTX 5090, reproduces every part number and torque figure
+with thinking disabled, and answers a spoken question in well under a second — including on
+a 10,000-token RAG prompt. Its memory numbers have reproduced across three runs. The matrix
+is **three runs, not six**: the fp8 KV cache runs were dropped (§"The candidates"). No
+profile is adopted yet. Read the newest run;
 the two below it predate the harness changes (pinned sampling, repeated tool cases,
 bucketed out-of-enum outcomes, a RAG-sized prompt, `nvidia-smi` while serving) and their
 tool scores cannot be compared with anything.
@@ -27,8 +27,10 @@ assumption:
   Marlin W4A16 with a "no native FP4 support" warning. A run can look like NVFP4 and
   not be, so every run records the kernel lines from the startup log.
 - **Whether FP8 KV cache is usable.** It buys memory and has reported quality collapse
-  on this architecture. Each candidate is run at both dtypes and scored on quality,
-  not only on what fits.
+  on this architecture, so it is declared and evaluated rather than assumed. Measured
+  answer as of 2026-09-25: **not needed**, because at `auto` the cache already holds
+  twice `max_model_len` per session — so the fp8 runs were dropped rather than run
+  (`docs/DECISIONS.md`). The rule stands; the matrix got smaller.
 - **Whether 4-bit damages what this system does.** §2 prefers higher precision because
   quantization damage shows up first on part numbers, torque figures and tool-call
   argument fidelity — which is exactly what is scored here, rather than throughput.
@@ -71,14 +73,20 @@ Defined in `evals/data/candidates.json`. Revisions resolved 2026-09-20.
 | `qwen3-30b-a3b-2507-awq` | `stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ` | Candidate B. No vendor NVFP4 build of Instruct-2507 exists, so 4-bit is the realistic path for the model SPEC originally chose. Official FP8 is ~32 GB and does not fit with a KV cache. |
 | `mistral-small-32-24b-awq` | `gghfez/Mistral-Small-3.2-24B-Instruct-hf-AWQ` | The §2 fallback. Community AWQ; no official build exists. |
 
-Each is run at `kv_cache_dtype` `auto` and `fp8`, so the matrix is six runs.
+Each is run at `kv_cache_dtype` **`auto` only, so the matrix is three runs.** The fp8 KV
+cache runs were dropped on 2026-09-25: candidate A at `auto` gives 207,842 KV tokens —
+about 69,000 per session at three concurrent — against a `max_model_len` of 32,768, so the
+cache is not the binding constraint and fp8 would trade quality for room this system does
+not need. `kv_cache_dtype` remains a declared, evaluated profile field, and fp8 becomes
+worth measuring if a candidate's weights leave much less room, `max_model_len` grows for
+RAG turns, or more than three sessions have to be served (`docs/DECISIONS.md`).
 
 ## What is measured
 
 | Metric | How | Why it decides anything |
 |---|---|---|
 | Memory fit | vLLM's own startup log: weights GiB, KV cache GiB and tokens | These are the numbers a profile must declare, in GiB. 5 GiB is held back for Whisper, BGE-M3 and the reranker, which share the card in Phase 1 (SPEC §2) — an **estimate**, unlike everything else here |
-| Card in use while serving | `nvidia-smi --query-gpu=memory.used`, read twice: model loaded and idle, then again after the concurrent long-context case | The outside view. vLLM's log is a self-report that cannot see the desktop, the helper models, or anything else on the card; `card_total − this` is what the helpers really have left |
+| Card in use while serving | `nvidia-smi --query-gpu=memory.used`, read twice: model loaded and idle, then again after the concurrent long-context case | The outside view. vLLM's log is a self-report, and it under-reports its own process by the 0.65 GiB the readings found; `card_total − this` is what the helpers really have left |
 | Usable context | KV cache tokens ÷ 3 concurrent sessions | §1 serves 2–3 concurrent voice users; `max_model_len` alone flatters the result |
 | Time to first token | Streaming, cold prefix and warm prefix, then 3 concurrent | The cold/warm gap is the evidence prefix caching works (§2) |
 | Time to a complete answer | Total generation seconds and tokens/s, at 1 and at 3 concurrent | What a person waiting in the barn actually experiences. Marlin's cost lands in generation, not TTFT, so TTFT alone hid it entirely |
@@ -119,25 +127,42 @@ taking it:
 | Line | GiB | Where it comes from |
 |---|---|---|
 | Card total | **31.84** | 32,607 MiB |
-| weights | 19.55 | vLLM |
-| non-torch overhead | 0.58 | vLLM |
-| CUDA graphs | 0.08 | vLLM |
-| KV cache | 4.90 | vLLM |
-| vLLM resident, expected | 25.11 | the four above |
+| weights | 19.55 | vLLM's log |
+| non-torch overhead | 0.58 | vLLM's log (20.13 consumed − 19.55 weights) |
+| CUDA graphs | 0.08 | vLLM's log |
+| KV cache | 4.90 | vLLM's log |
+| Sum of vLLM's profiled figures | 25.11 | the four above |
 | **In use while serving, measured** | **25.76** | `nvidia-smi` |
-| Unaccounted — the Windows desktop | 0.65 | 25.76 − 25.11 |
-| **Card total minus that: what the helpers actually get** | **6.08** | 31.84 − 25.76 |
+| Gap: vLLM process overhead outside the profiled figures (unattributed) | 0.65 | 25.76 − 25.11 |
+| **Card total minus the measured reading: what the helpers actually get** | **6.08** | 31.84 − 25.76 |
 | `aux_reserve_gib`, the estimate | 5.00 | declared |
 | **Margin over the estimate** | **1.08** | 6.08 − 5.00 |
+
+**Nothing but vLLM holds memory on this card.** The monitor runs on the motherboard's
+integrated graphics, and `nvidia-smi` reads 0 MiB whenever vLLM is down — before this run
+and after it. So the 0.65 GiB gap is not a desktop: it is vLLM's own footprint outside
+the figures its profiler reports — CUDA context, library workspaces, allocator reserve —
+and these logs do not say how it splits. It is recorded as unattributed rather than
+guessed at. The same correction applies to the **1.64 GiB "free memory on device
+(30.2/31.84)" on startup** in the run below, which an earlier version of this document
+called the Windows desktop: that is what vLLM's worker had already taken when it read the
+card, before any weights were loaded.
+
+The two figures are not the same quantity and must not be added: 1.64 GiB is what was
+resident at worker init, and 0.65 GiB is what the steady-state reading exceeds the
+profiled sum by. **How to settle it:** read `nvidia-smi` at three points instead of two —
+before `docker compose up`, after engine init but before weights load, and while serving.
+That separates CUDA context from allocator growth without guessing. Not built; the two
+readings answer the question that matters, which is how much is left.
 
 So the estimate holds, with about a gigabyte spare. Two caveats on that margin:
 
 1. **It is steady-state.** Peak activation (1.08 GiB by vLLM's profiler) is transient and
    does not appear in either reading, so a burst can eat the whole margin. Two samples
    are not a peak.
-2. **The 0.65 GiB is a desktop, and it moves.** It was 1.64 GiB before vLLM started on
-   2026-09-23. Open something on the Windows side and the margin narrows with it. On
-   `hub`, headless, this line disappears.
+2. **It is one profile's overhead, not a constant.** The 0.65 GiB belongs to this
+   checkpoint, this vLLM version and these flags. A different candidate can differ, which
+   is why the reading is taken per run rather than assumed once.
 
 #### Latency, and one figure that flatters
 
@@ -229,7 +254,7 @@ chat_template_kwargs = { enable_thinking = false }
 temperature = 0.0
 ```
 
-Still not adopted: five matrix runs remain, and `aux_reserve_gib` is still an estimate.
+Still not adopted: candidate B and the fallback have not run, and `aux_reserve_gib` is still an estimate.
 
 ### Run `evals/2026-09-23T16-13-25Z` — candidate A, KV cache `auto`, thinking disabled
 
@@ -258,7 +283,7 @@ which is neither the free space nor anything else meaningful. The free space is 
 | Line | GiB | Where it comes from |
 |---|---|---|
 | Card total | **31.84** | 32,607 MiB, as the driver reports it |
-| In use before vLLM started | 1.64 | "Free memory on device (30.2/31.84 GiB)" — the Windows desktop, absent on `hub` |
+| Already resident when vLLM read the card | 1.64 | "Free memory on device (30.2/31.84 GiB)" — **vLLM's own, before weights**; see the 2026-09-25 run. Not a desktop: the monitor is on the iGPU and `nvidia-smi` reads 0 MiB with vLLM down |
 | vLLM's share at `gpu_memory_utilization = 0.82` | **26.11** | 0.82 × 31.84 |
 | ├ weights | 19.55 | "Model loading took 19.55 GiB memory" |
 | ├ non-torch overhead | 0.58 | 20.13 consumed − 19.55 weights |
@@ -280,9 +305,11 @@ Two things worth taking from that arithmetic:
    CUDA graphs, the 1.16 GiB between those two figures. So a profile that only just
    passes validation has not been tried; vLLM's own preflight is the real guard. SPEC §2
    now says this in as many words.
-3. **The 1.64 GiB the desktop holds is a Phase 1 cost.** On `hub`, headless and with the
-   helpers on the 3070, that comes back and `aux_reserve_gib` drops to 0 — which is
-   exactly why SPEC §2 says `kv_cache_gib` does not carry over between machines.
+3. **The 1.64 GiB is vLLM's, not the machine's.** An earlier version of this document
+   called it the Windows desktop; it is not (2026-09-25 run). It does **not** come back on
+   `hub`, because vLLM will be running there too. What does change on `hub` is
+   `aux_reserve_gib` dropping to 0 with the helpers on the 3070, which is why SPEC §2 says
+   `kv_cache_gib` does not carry over between machines.
 
 #### `aux_reserve_gib = 5.0` is an estimate, and the only one here
 
@@ -293,12 +320,16 @@ real work: it is subtracted from vLLM's share, it is what `gpu_memory_utilizatio
 was chosen to leave free, and config validation rejects profiles against it. A profile
 can therefore pass every check and still not fit, if the estimate is low.
 
-Two things also make the estimate optimistic rather than conservative. The figure counts
-weights and nothing else — CTranslate2's and PyTorch's own allocator overhead, activation
+One thing makes the estimate optimistic rather than conservative: the figure counts
+weights and nothing else. CTranslate2's and PyTorch's own allocator overhead, activation
 during a batch of chunks, and whatever fragmentation results from three processes taking
-and returning memory beside a long-lived vLLM are all outside it. And in Phase 1 the
-Windows desktop is on the same card (1.64 GiB here), which the 5 GiB does not cover
-either.
+and returning memory beside a long-lived vLLM are all outside it — and vLLM's own
+unattributed overhead (0.65 GiB on 2026-09-25) shows that per-process overhead beyond the
+weights is real and not small.
+
+What does *not* threaten it is a desktop: the monitor runs on the motherboard's integrated
+graphics and this card holds 0 MiB whenever vLLM is down. Gaming does compete for the card
+(SPEC §14 Q9), but that is a scheduling question rather than a few hundred megabytes.
 
 **How to measure it, when the milestone arrives** — proposed, not built:
 
@@ -491,7 +522,11 @@ Beyond the numbers, three things that were assumptions before:
   ~90 MB and ~3 GB per minute. Weight load is 42 s, engine init 116 s, so a repeat run
   on a warm cache is ~3 minutes to serving.
 - The vLLM image is 30.5 GB unpacked, which is the larger disk cost on `C:`.
-- vLLM holds ~20 GiB of VRAM from engine start, before any weights are loaded.
+- vLLM's non-weight footprint is not small: 1.64 GiB was resident when the worker first
+  read the card, before any weights, plus 0.58 GiB of profiled non-torch overhead and
+  0.65 GiB the steady-state reading exceeds the profiled sum by. (An earlier note here
+  said "~20 GiB from engine start, before any weights" — that was a misreading of the
+  20.13 GiB weights-plus-non-torch figure, which is measured after the load.)
 
 ## Decision
 
@@ -501,9 +536,9 @@ torque figure, answers in 0.356 s with three satellites talking at once and in 0
 a cold 10k-token RAG prompt, breaks no schema bound in 45 tool calls, and needs thinking
 disabled to do any of it.
 
-Still required before a profile is adopted: candidate A at `fp8` KV cache, and candidate
-B and the fallback at both dtypes. The chosen profile then goes here, in
-`docs/DECISIONS.md` and in `config/farmhub.example.toml`.
+Still required before a profile is adopted: candidate B and the fallback, both at `auto`.
+The chosen profile then goes here, in `docs/DECISIONS.md` and in
+`config/farmhub.example.toml`.
 
 **What the runs have already settled for the application**, whichever model wins:
 

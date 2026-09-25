@@ -59,7 +59,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--kv-dtype",
         action="append",
         default=[],
-        help="KV cache dtype to evaluate; repeatable. Default: auto and fp8 (SPEC §2)",
+        help=(
+            "KV cache dtype to evaluate; repeatable. Default: auto only. fp8 was dropped "
+            "from the M1 matrix (docs/DECISIONS.md 2026-09-25): at auto the KV cache "
+            "already holds twice max_model_len per session, so fp8 would trade quality "
+            "for room this system does not need. Pass --kv-dtype fp8 to measure it anyway."
+        ),
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--load-timeout", type=float, default=1800.0)
@@ -218,7 +223,8 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    kv_dtypes = args.kv_dtype or ["auto", "fp8"]
+    # auto only: see docs/DECISIONS.md, 2026-09-25. fp8 stays available on request.
+    kv_dtypes = args.kv_dtype or ["auto"]
     matrix = Matrix.load(DATA)
     candidates = select(matrix, args.only, kv_dtypes)
 
