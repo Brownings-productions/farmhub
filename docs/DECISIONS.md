@@ -6,8 +6,9 @@ One short entry per architectural choice, dated. Status tags:
 - **Recorded**: decided now, implemented at the named milestone.
 - **Accepted (SPEC v1.2, 2026-09-20)**: differed from SPEC v1.1 and is now part of the accepted SPEC v1.2. The entry says which parts are implemented.
 - **Accepted (SPEC v1.3)**: part of the accepted SPEC v1.3 (2026-09-20), which amends §2 and §11 only.
+- **Accepted (SPEC v1.4, 2026-09-25)**: part of the accepted SPEC v1.4, which amends §2 and §11 and adds §14 Q9. No §3 rule is touched.
 
-SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule.
+SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule. SPEC v1.4 was accepted on 2026-09-25 and carries the two-phase hardware plan, the `nas`/`tv` split and §14 Q9.
 
 ---
 
@@ -245,14 +246,32 @@ The plan is no longer "develop anywhere, then build `hub`". It is two named phas
 
 **What Phase 1 does not settle** is uptime, recorded as SPEC §14 **Q9 (M1)**: the dev PC is the running system for a year, yet vLLM is started by hand (`restart: "no"` on purpose, `deploy/vllm/compose.yaml`) and Windows reboots for updates. How both come back, and what a satellite hears meanwhile, is settled before the M1 end-to-end test through Home Assistant.
 
-Supersedes the 2026-09-20 entry below, which wrote the 3070 out of the plan and made the second GPU conditional on M1's measurements. Part of SPEC v1.4, amending §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4).**
+Supersedes the 2026-09-20 entry below, which wrote the 3070 out of the plan and made the second GPU conditional on M1's measurements. Part of SPEC v1.4, amending §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25).**
 
 ### 2026-09-23: storage and media split into `nas` and `tv`
 The `nas` row in SPEC §2 described a machine that no longer matches the plan. `nas` is now a new TrueNAS build — corpus, media and backups — starting on integrated graphics, with a transcoding GPU possible later. The existing TrueNAS box becomes `tv`, a TV and emulation machine that keeps its GTX 1060 until that card is upgraded, and is not part of the FarmHub system at all.
 
 Both keep the old rule: **never an AI target.** Model inference runs on one machine at a time — the dev PC in Phase 1, `hub` in Phase 2 (see the entry below). A spare GPU in a media box is a standing temptation, and spreading inference across machines would make the runtime host's measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
 
-Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Proposed (SPEC v1.4)**, accepted with the revision as a whole.
+Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25)** with the revision as a whole.
+
+### 2026-09-25: the fp8 KV cache runs are dropped from the M1 matrix
+The matrix was six runs: three candidates at `kv_cache_dtype` `auto` and `fp8`. It is now three, at `auto` only.
+
+FP8 KV cache buys room in the KV cache. Candidate A at `auto` already has **207,842 KV tokens — about 69,000 per session at three concurrent sessions — against a `max_model_len` of 32,768**. The cache is not the binding constraint; it is more than twice what a session can even use. So fp8 would trade quality for room this system does not need, and SPEC §2 is explicit that "a memory win that costs part-number fidelity is not a win here" on an architecture with reported quality collapse at fp8.
+
+This does not retire the field. `kv_cache_dtype` stays a declared profile field, evaluated rather than assumed (SPEC §2), and fp8 becomes worth measuring the moment something changes the arithmetic: a model whose weights leave much less room, a larger `max_model_len` for RAG turns, or more than three concurrent sessions. The reason for skipping it is recorded here so that re-opening it is a decision rather than a rediscovery.
+
+**Amends SPEC §2's "M1 measures each candidate at the backend default and at FP8" and §11's M1 row**, both of which say both dtypes are measured. SPEC v1.4 was accepted before this decision, so the SPEC text still says six runs; fold this into the next revision. `evals/run.py` now defaults to `auto`, `--kv-dtype fp8` still works, and `config/farmhub.example.toml` no longer claims M1 measures both. **Recorded (M1), implemented.**
+
+### 2026-09-25: the memory beside vLLM is vLLM's own, not a desktop
+A correction, and the reason SPEC v1.4 was accepted with an amendment.
+
+Two figures were attributed to the Windows desktop: the **1.64 GiB** vLLM reported as already resident when its worker read the card (2026-09-23), and the **0.65 GiB** by which the measured `nvidia-smi` reading exceeds the sum of vLLM's profiled figures (2026-09-25). Neither is a desktop. The monitor runs on the motherboard's integrated graphics, and the 5090 reads **0 MiB whenever vLLM is down** — checked before and after the 2026-09-25 run. Nothing else is on the card.
+
+Both are therefore vLLM's own footprint outside the figures its profiler reports: CUDA context, library workspaces, allocator reserve. The logs do not say how it splits, so it is recorded as **"vLLM process overhead outside the profiled figures (unattributed)"** rather than guessed at, and the two numbers are not the same quantity and are not added. Settling it would need a third `nvidia-smi` reading between engine init and weight load; the two readings already answer the question that matters, which is how much is left.
+
+What this changes: the 1.64 GiB does **not** come back on `hub` — vLLM runs there too. What comes back on `hub` is `aux_reserve_gib` dropping to 0 with the helpers on the 3070. `docs/MODEL_EVAL.md` and SPEC §2 are corrected; §14 Q9's gaming contention is unaffected, since that is about who gets the card rather than a few hundred megabytes. **Recorded (M1).**
 
 ### 2026-09-25: the profile carries its request parameters, and every memory field says GiB
 Two changes to `ModelProfile`, both from the M1 runs.

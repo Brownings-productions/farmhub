@@ -10,7 +10,7 @@ Version 1.4. Everything here was decided deliberately. Where a decision looks od
 
 Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISIONS.md`). **Amends §2 and §11, and adds one question to §14's open list**; no §3 rule is touched, so like v1.3 it needs no safety acceptance. Rows 2–5 supersede rows 1, 2 and 7 of v1.3, which are left in place as history.
 
-**Status: proposed.** v1.4 is accepted as a whole once it has been read.
+**Status: accepted, 2026-09-25.** Accepted as a whole, with one correction folded in: the memory resident on the card beside vLLM is **not** a desktop compositor. The monitor runs on the motherboard's integrated graphics and the 5090 reads 0 MiB whenever vLLM is down, so that memory is vLLM's own overhead outside its profiled figures (`docs/MODEL_EVAL.md`). Gaming still competes for the card — §14 Q9.
 
 | # | Section | Change |
 |---|---------|--------|
@@ -127,7 +127,7 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 
 Where §2 and §8 say `hub` — Piper, Whisper, Postgres, the app itself — read "the Phase 1 runtime host" until `hub` is built.
 
-**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1. It is not a dedicated card, either: the same machine is a Windows desktop that is also used for gaming, so the card is shared with a desktop compositor and sometimes wanted whole by something else — see §14 Q9.
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1. It is not a dedicated card, either: the same machine is also used for gaming, so it is sometimes wanted whole by something else — see §14 Q9. The desktop itself is not a tenant; the monitor runs on the motherboard's integrated graphics, and this card reads 0 MiB whenever vLLM is down.
 
 **Phase 2, `hub`.** A new build with an RTX 5090 32 GB **and** an RTX 3070 8 GB — decided, not optional. The 5090 then serves the LLM alone and the helpers move to the 3070. The 5090 is power-limited to ~450 W since the machine runs permanently: inference loses very little and it runs cooler and quieter.
 
@@ -161,7 +161,7 @@ Rules that make "never silently OOM" keep teeth while one card is shared:
 - Config validation rejects a profile whose `weights_gib + kv_cache_gib + aux_reserve_gib` exceeds the card, and one whose `gpu_memory_utilization` does not leave at least `aux_reserve_gib` free.
 - **vLLM starts before the auxiliary models**, so its utilization fraction is computed against a known-free card rather than against whatever happened to load first.
 - **The budget numbers are measured, not estimated.** `weights_gib` and `kv_cache_gib` come from an evaluation run on the real card (§11 M1, `docs/MODEL_EVAL.md`), and a profile records the run that produced them. A profile carrying hand-written numbers is not a valid profile.
-- **A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub` — same card, same checkpoint — but `kv_cache_gib` does not: it is whatever is left once the helpers are on another card and no desktop is using the GPU. **No Phase 2 profile is adopted until an eval run on `hub` produces it.**
+- **A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub` — same card, same checkpoint — but `kv_cache_gib` does not: it is whatever is left once the helpers are on another card. **No Phase 2 profile is adopted until an eval run on `hub` produces it.**
 
 This validation is arithmetic over declared numbers, not a live VRAM probe. The real guard against OOM is still vLLM's own preflight plus the measured numbers; the validator catches a profile edited into something impossible. The evaluation harness does read the card from outside — `nvidia-smi` while the model is serving — so how much is really left beside vLLM is a measured figure even though `aux_reserve_gib` is not; FarmHub itself does no such probe (NVML is not on the §12 list). It is also deliberately incomplete: it counts weights and KV cache but not peak activation or CUDA graph memory, which live inside vLLM's share too (about 1.2 GiB on the measured profile, `docs/MODEL_EVAL.md`). Treat a profile that only just passes as one that has not been tried.
 
