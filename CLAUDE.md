@@ -22,8 +22,11 @@ Full specification: @SPEC.md — read it at the start of every session.
 
 ## Boundaries
 - **This machine only.** Never contact Home Assistant or any other host — no HTTP, no
-  WebSocket, no SSH, no ping. The one exception is the local vLLM container on this
-  machine. The real `ha` box is live and runs heating and pumps (SPEC §3.4, §10).
+  WebSocket, no SSH, no ping. Two exceptions, both local containers on this machine: the
+  vLLM container, and the throwaway Home Assistant dev container used for the M1
+  end-to-end test. **Any real Home Assistant instance is off limits.** The `ha` box does
+  not exist yet; when it does it will run heating and pumps (SPEC §3.4, §10), so the
+  habit has to be right before it is there.
 - **Never print a token or a secret**, in a command, a log line, a test fixture or a
   commit. Report whether one is set, never its value.
 - **If a rule or a deny rule blocks something you think you need, stop and ask.** Never
