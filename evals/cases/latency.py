@@ -133,6 +133,10 @@ def _summary(streams: list[Stream]) -> dict[str, Any]:
     return {
         "streams": len(streams),
         "prompt_tokens_median": round(statistics.median(prompts)) if prompts else None,
+        # Min and max too: the RAG streams each carry a different context, so this is
+        # the evidence they really are the same size.
+        "prompt_tokens_min": min(prompts) if prompts else None,
+        "prompt_tokens_max": max(prompts) if prompts else None,
         "ttft_s_median": round(statistics.median(ttfts), 3) if ttfts else None,
         "ttft_s_max": round(max(ttfts), 3) if ttfts else None,
         "answer_s_median": round(statistics.median(totals), 3) if totals else None,
@@ -167,16 +171,28 @@ async def run(base_url: str, model: str, timeout_s: float = 300.0) -> dict[str, 
 
         # A RAG-sized turn: thousands of tokens of retrieved manual, alone and under the
         # same concurrency. Prefill dominates, which is where Marlin's cost lands.
+        #
+        # Every stream gets its OWN context, of the same size and differing from its first
+        # line. Sharing one made the concurrent streams reuse the prefix the single stream
+        # had just cached, so they came out faster than it — a cache measurement wearing
+        # the clothes of a load measurement (docs/MODEL_EVAL.md, 2026-09-25).
         long_context = data.get("long_context")
         long_single: list[Stream] = []
         long_together: list[Stream] = []
         if long_context is not None:
-            question, context = long_context["question"], long_context["context"]
-            long_single = [await _stream(client, model, prefix, question, context=context)]
+            question = long_context["question"]
+            contexts: list[str] = long_context["contexts"]
+            if len(contexts) < concurrent + 1:
+                raise ValueError(
+                    f"long_context needs {concurrent + 1} distinct contexts (one per "
+                    f"stream) but has {len(contexts)}; reusing one measures the prefix "
+                    "cache, not load"
+                )
+            long_single = [await _stream(client, model, prefix, question, context=contexts[0])]
             long_gathered = await asyncio.gather(
                 *(
-                    _stream(client, model, prefix, question, context=context)
-                    for _ in range(concurrent)
+                    _stream(client, model, prefix, question, context=contexts[1 + i])
+                    for i in range(concurrent)
                 ),
                 return_exceptions=True,
             )

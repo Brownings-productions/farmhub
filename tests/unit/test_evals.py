@@ -483,11 +483,51 @@ def test_the_out_of_enum_cases_cover_both_languages() -> None:
     assert all(values for values in enums.values())
 
 
+def test_every_out_of_enum_case_has_an_in_enum_control() -> None:
+    """A decline must be attributable to the enum, not to the phrasing.
+
+    "Kan du skru på lyset i stabburet?" declined 3/3 and looked like correct enum
+    discipline. Its control — the same polite form naming the workshop, which *is* in the
+    enum — declined 2 of 3 too, so the model was refusing the phrasing (MODEL_EVAL.md,
+    2026-09-25). Every out-of-enum case needs that twin or its score means nothing.
+    """
+    data = json.loads((DATA_DIR / "tools.json").read_text(encoding="utf-8"))
+    cases = data["cases"]
+    needs_control = {c["id"] for c in cases if c.get("out_of_enum_param")}
+    controlled = {target for c in cases for target in c.get("control_for", [])}
+    assert needs_control - controlled == set()
+    # A control must itself expect a call, or it controls for nothing.
+    for case in cases:
+        if case.get("control_for"):
+            assert case.get("expect_tool") is not None, case["id"]
+
+
 def test_the_long_context_latency_prompt_is_rag_sized() -> None:
     """M4 returns top-5 reranked chunks; prefill at that size is what Marlin taxes."""
     data = json.loads((DATA_DIR / "latency.json").read_text(encoding="utf-8"))
-    context = data["long_context"]["context"]
-    # Roughly 6,000 tokens. The run records the server's own prompt_tokens; this only
-    # guards against the file being trimmed to something that no longer tests prefill.
-    assert 15000 < len(context) < 30000
-    assert "Nm" in context and "SKF" in context
+    contexts = data["long_context"]["contexts"]
+    for context in contexts:
+        # ~10,100 tokens as measured. The run records the server's own prompt_tokens;
+        # this only guards against the file being trimmed to something that no longer
+        # tests prefill.
+        assert 15000 < len(context) < 30000
+        assert "Nm" in context
+        assert any(maker in context for maker in ("SKF", "FAG", "NSK", "NTN"))
+
+
+def test_every_rag_stream_gets_its_own_cold_context() -> None:
+    """Sharing one context measures the prefix cache instead of load.
+
+    With a single context the three concurrent streams reused what the single stream had
+    just cached and came out *faster* than it (docs/MODEL_EVAL.md, 2026-09-25). So there
+    has to be one context per stream, each differing from its first line.
+    """
+    data = json.loads((DATA_DIR / "latency.json").read_text(encoding="utf-8"))
+    contexts = data["long_context"]["contexts"]
+    assert len(contexts) >= data["concurrent"] + 1
+    assert len(set(contexts)) == len(contexts)
+    # Differing somewhere is not enough: a shared opening is a shared prefix.
+    assert len({c.splitlines()[0] for c in contexts}) == len(contexts)
+    # Same size, or the comparison between them is not a comparison.
+    lengths = [len(c) for c in contexts]
+    assert (max(lengths) - min(lengths)) / min(lengths) < 0.1

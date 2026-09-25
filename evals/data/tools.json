@@ -1,5 +1,5 @@
 {
-  "_comment": "Synthetic tool schemas mirroring SPEC §7: enums, bounded numbers, explicit required, additionalProperties false. No real entity or script names.",
+  "_comment": "Synthetic tool schemas mirroring SPEC §7: enums, bounded numbers, explicit required, additionalProperties false. No real entity or script names. Every out_of_enum_param case has an in-enum control naming it in `control_for`, in the same language and phrasing: without one, a decline cannot be told apart from the model failing at the wording. 'Kan du skru på lyset i verkstedet?' found exactly that on 2026-09-25 (docs/MODEL_EVAL.md).",
   "tools": [
     {
       "type": "function",
@@ -155,7 +155,10 @@
         "area": "kitchen",
         "state": "on",
         "brightness_pct": 20
-      }
+      },
+      "control_for": [
+        "out-of-enum-fjoset"
+      ]
     },
     {
       "id": "in-enum-hall-norwegian",
@@ -165,7 +168,10 @@
         "area": "hall",
         "state": "on"
       },
-      "note": "The control for out-of-enum-loft: same verb ('Slå på'), Norwegian, area in the enum. Without it a decline on 'loftet' cannot be told apart from the model failing at the phrasing. Brightness is unscored: the utterance names none, and the schema makes the parameter required."
+      "note": "The control for out-of-enum-loft: same verb ('Slå på'), Norwegian, area in the enum. Without it a decline on 'loftet' cannot be told apart from the model failing at the phrasing. Brightness is unscored: the utterance names none, and the schema makes the parameter required.",
+      "control_for": [
+        "out-of-enum-loft"
+      ]
     },
     {
       "id": "in-enum-workshop-norwegian",
@@ -175,7 +181,10 @@
         "area": "workshop",
         "state": "on"
       },
-      "note": "The control for out-of-enum-stabburet: same polite question form, Norwegian, area in the enum. Brightness is unscored: the utterance names none, and the schema makes the parameter required."
+      "note": "The control for out-of-enum-stabburet: same polite question form, Norwegian, area in the enum. Brightness is unscored: the utterance names none, and the schema makes the parameter required.",
+      "control_for": [
+        "out-of-enum-stabburet"
+      ]
     },
     {
       "id": "service-record",
@@ -214,6 +223,20 @@
       "note": "Norwegian for the barn. Same case as out-of-enum-area, in the language the satellites actually hear."
     },
     {
+      "id": "in-enum-kitchen-english",
+      "utterance": "Turn the light on in the kitchen.",
+      "expect_tool": "set_indoor_light",
+      "expect_args": {
+        "area": "kitchen",
+        "state": "on"
+      },
+      "note": "The control for out-of-enum-garage: same phrasing, English, area in the enum. Brightness is unscored: the utterance names none, and the schema makes the parameter required. It also controls for out-of-enum-area ('Turn on the light in the barn'), whose word order differs slightly but whose vocabulary is identical — close enough that a decline there cannot be blamed on the phrasing.",
+      "control_for": [
+        "out-of-enum-garage",
+        "out-of-enum-area"
+      ]
+    },
+    {
       "id": "out-of-enum-garage",
       "utterance": "Turn the light on in the garage.",
       "expect_tool": null,
@@ -233,6 +256,19 @@
       "expect_tool": null,
       "out_of_enum_param": "area",
       "note": "stabbur (a farm storehouse): not in the enum, and no English cognate to fall back on."
+    },
+    {
+      "id": "in-enum-beds-english",
+      "utterance": "Water the beds for ten minutes.",
+      "expect_tool": "start_greenhouse_watering",
+      "expect_args": {
+        "zone": "beds",
+        "duration_min": 10
+      },
+      "note": "The control for out-of-enum-zone-lawn: same phrasing, English, zone in the enum.",
+      "control_for": [
+        "out-of-enum-zone-lawn"
+      ]
     },
     {
       "id": "out-of-enum-zone-lawn",
