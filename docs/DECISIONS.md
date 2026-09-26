@@ -255,6 +255,21 @@ Both keep the old rule: **never an AI target.** Model inference runs on one mach
 
 Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25)** with the revision as a whole.
 
+### 2026-09-26: the profile is the single source of truth for the serving environment
+A profile recorded what was measured; `deploy/vllm/.env` decided what was served; nothing connected them. That gap is not theoretical — the eval harness rewrites that file for every candidate it runs, so after the 2026-09-25 matrix it held the Mistral fallback with the fallback's `--chat-template`, not candidate A. Starting vLLM for the M1 end-to-end test would have served the wrong model, and FarmHub would not have noticed: `probe()` compares the *served name*, which is the label `farmhub-primary`, not the checkpoint.
+
+The sharper version of the same gap: candidate A is a multimodal checkpoint run text-only (SPEC §2), and the flag that excludes the vision tower lived only in the candidate JSON and in `.env`. Drop it and the tower loads — weights grow, the KV cache shrinks, and the profile's `weights_gib`/`kv_cache_gib` stop describing what is running. Config validation still passes, because it is arithmetic over declared numbers rather than a probe.
+
+Three changes, and the profile becomes the record of a whole measured configuration rather than half of one:
+
+- **`ModelProfile.server_args: list[str]`, required.** The server-side flags the profile was measured with, beyond the typed fields: block size, max-num-seqs, tool-call parser, and anything model-specific. The harness emits it from the candidate's own `server_args()`, so nobody types it. An empty list is allowed for a backend that needs no flags. `--max-num-seqs 8` is recorded although the harness never set it: compose defaults it to 8, that default was in force for every measurement, and a profile that stayed silent would let it change unnoticed.
+- **`farmhub vllm env --profile <name> [--write]`** renders the model half of `.env` from a profile and keeps the operator's own keys (image tag, cache directory, port, bind address, the WSL2 pin-memory flag). `.env` stops being a file anyone edits.
+- **`farmhub config check` and server startup compare the file with the active profile and fail on a mismatch**, naming the keys that differ and never printing a value — the file sits beside secrets. No profile, no file, or `llm.serving_env_file` unset means nothing was compared, and the output says so rather than implying a pass, so Ollama and the test double still start.
+
+`core/serving.py` is the only place that knows the mapping, mirroring `deploy/vllm/compose.yaml`'s command; a flag added there is added here and then guarded. The honest limit: this cannot stop someone editing `.env` and running `vllm.sh up` by hand. It stops FarmHub *serving* against a configuration its profile never measured, which is the failure that would otherwise be silent.
+
+SPEC §2's profile field list gains `server_args`; that edit goes into v1.5. **Recorded (M1), implemented.**
+
 ### 2026-09-25: the fp8 KV cache runs are dropped from the M1 matrix
 The matrix was six runs: three candidates at `kv_cache_dtype` `auto` and `fp8`. It is now three, at `auto` only.
 

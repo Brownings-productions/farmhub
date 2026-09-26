@@ -195,6 +195,73 @@ could not read" flag never reached the run-level counter, so no warning fired; a
 `kernel_summary` reported this candidate as `flashinfer` when its weights ran through
 Marlin, because it matched FlashInfer's *sampling* lines.
 
+### Emitted profiles, all three validated
+
+Re-emitted from the stored results so each carries `server_args` — the server-side flags it
+was measured with — and each pasted through `ModelProfile` before being written here. No new
+runs: the flags were already recorded in the result files.
+
+`deploy/vllm/.env` is rendered from whichever of these is chosen
+(`farmhub vllm env --profile <name> --write`), and `config check` fails when the file and the
+active profile disagree. Candidate A's last flag is the reason that matters: lose
+`--language-model-only` and the vision tower loads, weights grow, the KV cache shrinks, and
+the two memory figures above stop describing what is running.
+
+```toml
+[profiles.qwen36_35b_a3b_nvfp4]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gib = 19.55
+kv_cache_gib = 4.9
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
+measured_by = "evals/2026-09-25T15-42-33Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+server_args = ["--block-size", "128", "--max-num-seqs", "8", "--tool-call-parser", "hermes", "--language-model-only"]
+
+[profiles.qwen3_30b_a3b_2507_awq]
+repo_id = "stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ"
+revision = "d1a5d0d183a72483152c37ebdb88d4a015a3c8ea"
+quantization = "compressed-tensors"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gib = 15.7
+kv_cache_gib = 9.07
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
+measured_by = "evals/2026-09-25T16-16-15Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+server_args = ["--block-size", "16", "--max-num-seqs", "8", "--tool-call-parser", "hermes"]
+
+# Emitted for completeness. Not usable as configured: see above.
+[profiles.mistral_small_32_24b_awq]
+repo_id = "gghfez/Mistral-Small-3.2-24B-Instruct-hf-AWQ"
+revision = "9f337c5a5e23a14e9e665df29a16ca2fc519149b"
+quantization = "awq_marlin"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gib = 13.3
+kv_cache_gib = 10.06
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
+measured_by = "evals/2026-09-25T20-38-29Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+server_args = ["--block-size", "16", "--max-num-seqs", "8", "--tool-call-parser", "mistral", "--chat-template", "/vllm-workspace/examples/tool_chat_template_mistral3.jinja"]
+```
+
+Note candidate B's `quantization = "compressed-tensors"`: the checkpoint is llm-compressor's
+AWQ output despite the AWQ in its repository name, and declaring `awq_marlin` cost a 17 GB
+download before vLLM refused the mismatch. `--check` now compares the two beforehand.
+
 ### If the monitor stays on the 5090: what candidate A would need
 
 **A proposal, computed and not applied.** With a desktop permanently on this card, a

@@ -99,6 +99,44 @@ Two fields are request parameters rather than memory, and both are required:
 Both are printed by `config check` and logged at startup, so a running FarmHub says on
 its first lines how it is sampling.
 
+### Switching the serving profile
+
+`deploy/vllm/.env` decides what vLLM actually serves. **Do not hand-edit it.** It is
+rendered from the chosen profile, because the two drifting apart is invisible otherwise:
+the eval harness rewrites that file for every candidate it runs, so after a matrix run it
+holds the *last candidate measured* rather than the one you chose.
+
+```sh
+uv run farmhub vllm env --profile primary          # print it, change nothing
+uv run farmhub vllm env --profile primary --write  # render deploy/vllm/.env
+./deploy/vllm/vllm.sh up && ./deploy/vllm/vllm.sh wait
+```
+
+Your own keys are read from the existing file and kept: `VLLM_IMAGE_TAG`, `HF_CACHE_DIR`,
+`VLLM_PORT`, `VLLM_BIND_HOST`, `VLLM_WSL2_ENABLE_PIN_MEMORY`. Everything the profile
+determines is replaced, so no flag survives from the model that was served before.
+
+**The check that makes it stick.** `farmhub config check` and server startup compare the
+file with the active profile and fail on a mismatch, naming the keys that differ and never
+printing a value — that file sits beside secrets. A missing file, no profile, or
+`llm.serving_env_file` unset means nothing was compared, and the output says so rather
+than implying a pass.
+
+```
+$ uv run farmhub config check
+error: deploy/vllm/.env does not match profile 'primary': VLLM_EXTRA_ARGS differ. …
+        Regenerate with `farmhub vllm env --profile primary --write`
+```
+
+Why it matters concretely: candidate A is a multimodal checkpoint run text-only, and the
+flag that keeps the vision tower out lives in `VLLM_EXTRA_ARGS`. Lose it and the tower
+loads — weights grow, the KV cache shrinks, and the profile's `weights_gib` and
+`kv_cache_gib` stop describing what is running, while every other check still passes
+(that validation is arithmetic over declared numbers, not a probe).
+
+It cannot stop you editing the file and running `vllm.sh up` by hand. It stops FarmHub
+*serving* against a configuration its profile never measured.
+
 ### Checkpoint cache and disk
 
 `HF_CACHE_DIR` must point inside the Linux filesystem (`~/.cache/huggingface`), never at
