@@ -99,6 +99,52 @@ Two fields are request parameters rather than memory, and both are required:
 Both are printed by `config check` and logged at startup, so a running FarmHub says on
 its first lines how it is sampling.
 
+### Phase 1: switching FarmHub off for gaming
+
+The dev PC is both the runtime host and the gaming machine, and the 5090 cannot do both at
+once. This is manual on purpose (SPEC §14 Q9): nothing auto-starts, so the card is never
+reclaimed at a moment nobody chose.
+
+**Set up once.** The monitor plugs into the **motherboard**, not the 5090 — that is what
+gives FarmHub the whole card, and a monitor on the 5090 costs ~1.66 GiB, which pushes the
+helper models below `aux_reserve_gib`. Games still render on the 5090: set each one to
+**High performance** in Windows → Settings → System → Display → Graphics.
+
+**Two desktop shortcuts.** `FarmHub OFF.bat`:
+
+```bat
+wsl bash -lc "cd ~/code/farmhub && ./deploy/vllm/vllm.sh down"
+```
+
+`FarmHub ON.bat`:
+
+```bat
+wsl bash -lc "cd ~/code/farmhub && ./deploy/vllm/vllm.sh up && ./deploy/vllm/vllm.sh wait"
+```
+
+`wait` blocks until `/health` answers, so the window closing means the model is actually
+serving rather than merely started. Expect a few minutes on a warm checkpoint cache.
+
+**Two rules.**
+
+- **Never use them during an evaluation run.** The harness brings vLLM up and down itself
+  and writes `deploy/vllm/.env` as it goes; interfering mid-run produces measurements that
+  describe neither candidate. Check first: `docker ps` showing `farmhub-vllm` while you did
+  not start it means a run owns it.
+- **Never start vLLM before `.env` has been regenerated from the active profile** — see
+  the next section. After any evaluation run that file holds the *last candidate measured*,
+  so starting it blind serves the wrong model.
+
+**What happens while it is off.** FarmHub keeps running, degraded: the `llm` module reports
+unhealthy, the registry retries with backoff, and a satellite is told FarmHub is unavailable
+instead of waiting for a timeout. Home Assistant's own intents and every automation keep
+working — heating, pumps and irrigation never depended on this machine being awake (SPEC §2,
+§3.2). Nothing needs restarting on the FarmHub side when vLLM comes back; the health probe
+notices within `llm.health_interval_s`.
+
+**After a Windows reboot**, nothing comes back by itself. Start Docker Desktop, then
+`FarmHub ON.bat`.
+
 ### Switching the serving profile
 
 `deploy/vllm/.env` decides what vLLM actually serves. **Do not hand-edit it.** It is
