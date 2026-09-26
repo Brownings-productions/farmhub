@@ -81,6 +81,10 @@ def profile_toml(entry: dict[str, Any], identifier: str, card_total_gib: float) 
         # Likewise emitted from the request, not from a constant: the profile has to
         # sample the way the run that scored it sampled.
         f"temperature = {temperature}\n"
+        # And the server side, so the chosen profile can regenerate the environment it
+        # was measured with. Without this the flags live only here, in the candidate
+        # JSON, and in whatever .env the last run happened to leave behind.
+        f"server_args = {json.dumps(entry.get('server_args') or [])}\n"
     )
 
 

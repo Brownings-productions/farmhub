@@ -111,6 +111,27 @@ class Candidate:
             raise ProfileError(f"{self.name}: could not read a sha for {self.repo_id}")
         return sha
 
+    def server_args(self) -> list[str]:
+        """The server flags this candidate runs with, beyond a profile's typed fields.
+
+        What goes into a profile's ``server_args`` (SPEC §2), so the chosen profile can
+        regenerate the exact serving environment it was measured with rather than
+        inheriting whatever the last candidate left in ``deploy/vllm/.env``.
+
+        ``--max-num-seqs`` is included although ``env()`` does not set it: compose
+        defaults it to 8, that default was in force for every measurement, and a profile
+        that does not say so would let it change silently.
+        """
+        args = [
+            "--block-size",
+            str(self.block_size),
+            "--max-num-seqs",
+            "8",
+            "--tool-call-parser",
+            self.tool_call_parser,
+        ]
+        return args + self.extra_args.split()
+
     def env(self, served_name: str = "farmhub-eval") -> dict[str, str]:
         """The deploy/vllm/.env this candidate corresponds to."""
         return {

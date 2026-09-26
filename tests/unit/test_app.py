@@ -72,6 +72,7 @@ def test_the_composition_root_hands_the_profiles_switches_to_the_backend() -> No
                 "measured_by": "evals/2026-09-23T16-13-25Z",
                 "chat_template_kwargs": {"enable_thinking": False},
                 "temperature": 0.0,
+                "server_args": ["--block-size", "128", "--language-model-only"],
             }
         },
     )

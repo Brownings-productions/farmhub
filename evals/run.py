@@ -265,6 +265,7 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
     # parameter cannot then pass as a clean result (docs/MODEL_EVAL.md).
     entry["chat_template_kwargs"] = dict(cases_common.CHAT_TEMPLATE_KWARGS)
     entry["temperature"] = cases_common.TEMPERATURE
+    entry["server_args"] = candidate.server_args()
     entry["max_completion_tokens"] = {
         name: (entry.get(name) or {}).get("max_completion_tokens")
         for name in ("latency", "tools", "grounding", "classifier")

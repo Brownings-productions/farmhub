@@ -9,6 +9,13 @@ import typer
 from farmhub import __version__
 from farmhub.core.config import Settings, load_settings
 from farmhub.core.errors import ConfigError
+from farmhub.core.serving import (
+    DEFAULT_ENV_PATH,
+    OWNED_KEYS,
+    parse_env_file,
+    render_env_file,
+    verify_settings,
+)
 
 app = typer.Typer(
     name="farmhub",
@@ -18,6 +25,8 @@ app = typer.Typer(
 )
 config_app = typer.Typer(help="Inspect configuration.", no_args_is_help=True)
 app.add_typer(config_app, name="config")
+vllm_app = typer.Typer(help="The vLLM server's environment.", no_args_is_help=True)
+app.add_typer(vllm_app, name="vllm")
 
 EXIT_INVALID_CONFIG = 2
 
@@ -100,8 +109,70 @@ def config_check(ctx: typer.Context) -> None:
         typer.echo(f"profile.kv_cache_dtype = {profile.kv_cache_dtype}")
         typer.echo(f"profile.measured_by = {profile.measured_by}")
 
+    # The serving environment is part of the configuration: a profile that describes a
+    # different setup than the one vLLM will be started with makes its measured numbers
+    # a fiction (core/serving.py).
+    try:
+        note = verify_settings(settings)
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(EXIT_INVALID_CONFIG) from exc
+    typer.echo(f"serving_env = {note if note else 'matches the active profile'}")
+
     for event, detail in settings.safety_warnings():
         typer.echo(f"WARNING: {event}: {detail}", err=True)
+
+
+@vllm_app.command("env")
+def vllm_env(
+    ctx: typer.Context,
+    profile_name: Annotated[
+        str | None,
+        typer.Option("--profile", help="Profile to render. Default: the configured one."),
+    ] = None,
+    write: Annotated[
+        bool,
+        typer.Option("--write", help="Write the file instead of printing it."),
+    ] = False,
+) -> None:
+    """Render the model half of the vLLM environment from a measured profile.
+
+    The operator's own keys — image tag, cache directory, port, bind address, the WSL2
+    pin-memory flag — are read from the existing file and kept. Everything the profile
+    determines is replaced, so switching profiles never means editing the file by hand
+    and never leaves a flag behind from the last model that was served.
+    """
+    options: CliOptions = ctx.obj
+    settings = load_cli_settings(options)
+
+    name = profile_name or settings.llm.profile
+    if name is None:
+        typer.echo(
+            "error: no profile given and llm.profile is unset. A serving environment "
+            "can only be rendered from a measured profile (SPEC §2).",
+            err=True,
+        )
+        raise typer.Exit(EXIT_INVALID_CONFIG)
+    profile = settings.profiles.get(name)
+    if profile is None:
+        known = ", ".join(sorted(settings.profiles)) or "none"
+        typer.echo(f"error: no [profiles.{name}] block (known: {known})", err=True)
+        raise typer.Exit(EXIT_INVALID_CONFIG)
+
+    path = settings.llm.serving_env_file or DEFAULT_ENV_PATH
+    existing = parse_env_file(path) if path.is_file() else {}
+    text = render_env_file(profile, settings.llm.model, existing)
+
+    if not write:
+        typer.echo(text, nl=False)
+        return
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"error: cannot write {path}: {exc}", err=True)
+        raise typer.Exit(EXIT_INVALID_CONFIG) from exc
+    # Never echo the contents: this file sits beside secrets.
+    typer.echo(f"wrote {path} from profile {name!r} ({len(OWNED_KEYS)} keys)")
 
 
 @app.command("serve")

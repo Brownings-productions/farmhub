@@ -78,6 +78,15 @@ class ModelProfile(BaseModel):
     # (docs/MODEL_EVAL.md). A profile states what it was measured at, so the app serves
     # the model the way the run scored it.
     temperature: float = Field(ge=0.0, le=2.0)
+    # The server-side flags this profile was measured with, beyond the typed fields
+    # above: block size, tool-call parser, and anything model-specific such as
+    # candidate A's `--language-model-only`. Required, because these decide what is
+    # actually served and nothing else records them: drop that one flag and the vision
+    # tower loads, weights grow, the KV cache shrinks, and weights_gib/kv_cache_gib
+    # above become fiction while every check here still passes. `core/serving.py`
+    # renders deploy/vllm/.env from them and compares the file against them at startup.
+    # An empty list is allowed for a backend that needs no flags.
+    server_args: list[str]
 
     @model_validator(mode="after")
     def _check(self) -> "ModelProfile":
@@ -136,6 +145,11 @@ class LlmSettings(BaseModel):
     # How often the registry re-probes the backend. vLLM is not always running
     # (docs/RUNBOOK.md), so this is what notices it came back.
     health_interval_s: float = Field(default=30.0, gt=0.0)
+    # The vLLM server's environment file, compared against the active profile at startup
+    # and by `config check` (core/serving.py). Set to nothing to skip the check — which
+    # is right when the backend is Ollama or a test double, or when vLLM runs on another
+    # host whose .env this machine cannot see.
+    serving_env_file: Path | None = Path("deploy/vllm/.env")
 
 
 class ApiSettings(BaseModel):
@@ -258,6 +272,10 @@ class Settings(BaseSettings):
             # Sampling is a comparability question, not only a quality one: a score from
             # an unpinned run cannot be compared with anything (docs/MODEL_EVAL.md).
             "llm_temperature": profile.temperature if profile is not None else "<no profile>",
+            # What the server itself was started with. Printed because a profile that
+            # describes a different configuration than the one serving is the failure
+            # this field exists to prevent (core/serving.py).
+            "llm_server_args": list(profile.server_args) if profile is not None else "<no profile>",
         }
 
     def safety_warnings(self) -> list[tuple[str, str]]:

@@ -139,6 +139,7 @@ card_total_gib = 31.8
 measured_by = "evals/2026-09-20T12-00-00Z"
 chat_template_kwargs = { enable_thinking = false }
 temperature = 0.0
+server_args = ["--block-size", "128", "--tool-call-parser", "hermes", "--language-model-only"]
 """
 
 
@@ -197,6 +198,37 @@ def test_a_profile_without_temperature_fails_startup(tmp_path: Path) -> None:
 def test_the_startup_summary_shows_the_sampling_temperature(tmp_path: Path) -> None:
     settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
     assert settings.safety_summary()["llm_temperature"] == 0.0
+
+
+def test_a_profile_without_server_args_fails_startup(tmp_path: Path) -> None:
+    """The flags decide what is actually served, and nothing else records them.
+
+    Drop candidate A's --language-model-only and the vision tower loads: weights grow,
+    the KV cache shrinks, and weights_gib/kv_cache_gib become fiction while every check
+    in this file still passes (docs/MODEL_EVAL.md, core/serving.py).
+    """
+    toml = "\n".join(
+        line for line in GOOD_PROFILE.splitlines() if not line.startswith("server_args")
+    )
+    with pytest.raises(ConfigError, match="server_args"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_an_empty_server_args_loads(tmp_path: Path) -> None:
+    """A backend that needs no flags is a declaration, not an omission."""
+    toml = GOOD_PROFILE.replace(
+        'server_args = ["--block-size", "128", "--tool-call-parser", "hermes", '
+        '"--language-model-only"]',
+        "server_args = []",
+    )
+    profile = load_settings(write_toml(tmp_path, toml)).active_profile()
+    assert profile is not None
+    assert profile.server_args == []
+
+
+def test_the_startup_summary_shows_the_server_flags(tmp_path: Path) -> None:
+    settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
+    assert "--language-model-only" in settings.safety_summary()["llm_server_args"]  # type: ignore[operator]
 
 
 @pytest.mark.parametrize("revision", ["main", "v1.0", "1355db6", "z" * 40])
