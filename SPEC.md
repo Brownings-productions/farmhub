@@ -2,7 +2,22 @@
 
 A local-first AI hub for a Norwegian homestead: RAG over farm documents, voice satellites, Home Assistant control, web lookups, and parametric CAD generation. Single Python spine, pluggable modules.
 
-Version 1.4. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+Version 1.5. Everything here was decided deliberately. Where a decision looks odd, §3 or the rationale notes explain why.
+
+---
+
+## Changes in v1.5
+
+Folds in the M1 evaluation's conclusions (see `docs/MODEL_EVAL.md` and `docs/DECISIONS.md`). **Amends §2, §11 and §14 only**; no §3 rule is touched, so it needs no safety acceptance.
+
+**Status: accepted, 2026-09-25.**
+
+| # | Section | Change |
+|---|---------|--------|
+| 1 | §2 Models, §11 | **The M1 matrix is three runs at `kv_cache_dtype = "auto"`, not six at both dtypes.** At `auto` the measured KV cache already holds about twice `max_model_len` per session at three concurrent sessions, so the cache is not the binding constraint and fp8 would trade quality for room this system does not need. `kv_cache_dtype` remains a declared, evaluated field; fp8 becomes worth measuring if a candidate's weights leave much less room, `max_model_len` grows, or more than three sessions must be served. |
+| 2 | §14 | **Q9 resolved (M1): Phase 1 uptime is manual, by choice.** Before gaming, vLLM is stopped; afterwards it is started and waited for. Nothing auto-starts after a Windows reboot. While vLLM is down FarmHub stays up **degraded** and a satellite is told FarmHub is unavailable; Home Assistant's own intents and every automation keep working (§3.2). Removed from the open list. |
+| 3 | §2 Machines, §2 GPU assignment | **The monitor rule.** In Phase 1 the monitor stays on the **motherboard**, and games render on the 5090 through Windows' per-app graphics setting, so FarmHub gets the whole card and its baseline is 0 while serving. Moving the monitor to the 5090 costs **~1.66 GiB** and pushes the auxiliary models below `aux_reserve_gib`. Replaces v1.4's status note, which claimed the card "reads 0 MiB whenever vLLM is down" — too strong: that is true of this arrangement, not of the hardware. |
+| 4 | §2 GPU assignment | The profile field list gains **`server_args`**, the server-side flags a profile was measured with. `deploy/vllm/.env` is rendered from them and checked against them at startup, so what is served is what was scored. |
 
 ---
 
@@ -10,7 +25,7 @@ Version 1.4. Everything here was decided deliberately. Where a decision looks od
 
 Folds in the hardware plan and the storage split of 2026-09-23 (see `docs/DECISIONS.md`). **Amends §2 and §11, and adds one question to §14's open list**; no §3 rule is touched, so like v1.3 it needs no safety acceptance. Rows 2–5 supersede rows 1, 2 and 7 of v1.3, which are left in place as history.
 
-**Status: accepted, 2026-09-25.** Accepted as a whole, with one correction folded in: the memory resident on the card beside vLLM is **not** a desktop compositor. The monitor runs on the motherboard's integrated graphics and the 5090 reads 0 MiB whenever vLLM is down, so that memory is vLLM's own overhead outside its profiled figures (`docs/MODEL_EVAL.md`). Gaming still competes for the card — §14 Q9.
+**Status: accepted, 2026-09-25.** Accepted as a whole, with one correction folded in: the memory resident on the card beside vLLM is **not** a desktop compositor. **Superseded in part by v1.5 row 3:** this note went on to claim the 5090 "reads 0 MiB whenever vLLM is down", which is true of the Phase 1 arrangement rather than of the hardware — a monitor plugged into this card holds ~1.66 GiB. See §2's monitor rule. Gaming still competes for the card — §14 Q9.
 
 | # | Section | Change |
 |---|---------|--------|
@@ -127,7 +142,9 @@ Everything runs on local hardware. No cloud inference. Outbound network is limit
 
 Where §2 and §8 say `hub` — Piper, Whisper, Postgres, the app itself — read "the Phase 1 runtime host" until `hub` is built.
 
-**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1. It is not a dedicated card, either: the same machine is also used for gaming, so it is sometimes wanted whole by something else — see §14 Q9. The desktop itself is not a tenant; the monitor runs on the motherboard's integrated graphics, and this card reads 0 MiB whenever vLLM is down.
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured and *run* on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine: the PSU will not take it. So the LLM and the helper models (faster-whisper, BGE-M3, bge-reranker-v2-m3, ~5 GB together) share the one card. This is the profile every milestone is built and measured on, not a fallback and not a degradation, and it constrains M3, M4 and M9 as much as M1. It is not a dedicated card, either: the same machine is also used for gaming, so it is sometimes wanted whole by something else — settled in §14 Q9, manually.
+
+**The monitor rule.** The monitor stays plugged into the **motherboard**, and games render on the 5090 through Windows' per-app graphics setting. That is what makes the whole card available to FarmHub: with the monitor there, the 5090's baseline is 0 while vLLM serves, and the measured profile's `gpu_memory_utilization = 0.82` is valid. **Moving the monitor to the 5090 costs about 1.66 GiB** (measured), which comes straight out of what the auxiliary models have left and pushes them below `aux_reserve_gib`; a profile would then need `gpu_memory_utilization ≤ 0.79`. It is an operational choice with a measured price, not a property of the hardware — and each evaluation run records the card's baseline before starting vLLM so a measurement taken the other way cannot be mistaken for this one.
 
 **Phase 2, `hub`.** A new build with an RTX 5090 32 GB **and** an RTX 3070 8 GB — decided, not optional. The 5090 then serves the LLM alone and the helpers move to the 3070. The 5090 is power-limited to ~450 W since the machine runs permanently: inference loses very little and it runs cooler and quieter.
 
@@ -146,7 +163,7 @@ ha is a separate physical machine on purpose. Heating and pumps must keep workin
 - `CUDA_VISIBLE_DEVICES=0` → vLLM, configured by a model profile (below).
 - `CUDA_VISIBLE_DEVICES=1` → faster-whisper, BGE-M3, bge-reranker-v2-m3. ~5.2 GiB on the 3070's 8 GB — an estimate, see `aux_reserve_gib` below.
 
-Config carries per-model profiles: `repo_id`, `revision`, `quantization`, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib`, `measured_by`, `chat_template_kwargs` and `temperature`. None of these is hard-coded.
+Config carries per-model profiles: `repo_id`, `revision`, `quantization`, `kv_cache_dtype`, `gpu_memory_utilization`, `max_model_len`, `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib`, `measured_by`, `chat_template_kwargs`, `temperature` and `server_args`. None of these is hard-coded.
 
 Every memory figure is **GiB** — the unit vLLM reports and the evaluation records — and the field names say so, so no reader has to guess whether a conversion happened.
 
@@ -154,6 +171,7 @@ The last two are request parameters rather than memory, and both are **required*
 
 - `chat_template_kwargs` is what every request must carry for this model to answer at all. For the M1 candidates that is `{ enable_thinking = false }`: with thinking on, Qwen3.6 spends the whole token budget reasoning and never reaches an answer, which scored 2 of 6 on part numbers by never finishing (`docs/MODEL_EVAL.md`). It lives in the profile because the next model may spell the switch differently. An empty table is allowed for a model that needs nothing, and startup warns.
 - `temperature` is the sampling setting the profile was measured at, sent whenever a caller names none. The server's default is not an answer: the first two evaluation runs took it, and each tool score was a single unreproducible draw.
+- `server_args` is the **server-side** configuration the profile was measured with — block size, tool-call parser, and anything model-specific such as the flag that keeps a multimodal checkpoint's vision tower out of memory. `deploy/vllm/.env` is rendered from it and compared against it at startup, because the two drifting apart is otherwise invisible: drop that one flag and the tower loads, weights grow, the KV cache shrinks, and `weights_gib`/`kv_cache_gib` stop describing what is running while every check below still passes. An empty list is allowed for a backend that needs no flags.
 
 Rules that make "never silently OOM" keep teeth while one card is shared:
 
@@ -187,11 +205,11 @@ The repository IDs above were verified on 2026-09-20. Model IDs live only in con
 
 **Every profile pins a `revision` (commit sha).** A tag or a branch is not a pin: one NVFP4 upload of Qwen3.6-35B-A3B was silently replaced on 2026-07-10 with weights that produce looping output, and an unpinned profile would have picked that up on the next pull. The evaluation harness refuses to run an unpinned profile and verifies the resolved sha against the one requested.
 
-**`kv_cache_dtype` is declared and evaluated, never assumed.** FP8 KV cache buys memory, and on this hybrid architecture it has reported quality collapse. M1 measures each candidate at the backend default and at FP8, scoring quality as well as memory; a memory win that costs part-number fidelity is not a win here.
+**`kv_cache_dtype` is declared and evaluated, never assumed.** FP8 KV cache buys memory, and on this hybrid architecture it has reported quality collapse. **M1 measured `auto` only, and that is the answer for now:** at `auto` the measured cache holds about twice `max_model_len` per session at three concurrent sessions, so the cache is not the binding constraint and fp8 would trade quality for room this system does not need — a memory win that costs part-number fidelity is not a win here. The field stays declared and evaluated rather than assumed, and fp8 becomes worth measuring if a candidate's weights leave much less room, `max_model_len` grows for RAG turns, or more than three sessions must be served (`docs/DECISIONS.md`).
 
 Higher precision is preferred over 4-bit because quantization damage shows up first on exactly the things this system does: part numbers, torque figures, tool-call argument fidelity. That is why the M1 evaluation scores those directly rather than throughput alone, and it is the same reason FP8 KV cache is not taken on trust.
 
-**At M1:** evaluate candidate A first — it is the proof that the NVFP4 stack works on this card at all — then candidate B in 4-bit, then the fallback, each at both KV cache dtypes. Record the whole matrix in `docs/MODEL_EVAL.md`, the chosen profile in `config/farmhub.example.toml` and `docs/DECISIONS.md`.
+**At M1:** evaluate candidate A first — it is the proof that the NVFP4 stack works on this card at all — then candidate B in 4-bit, then the fallback, **each at `auto` only: three runs, not six** (row 1 above). Record the whole matrix in `docs/MODEL_EVAL.md`, the chosen profile in `config/farmhub.example.toml` and `docs/DECISIONS.md`.
 
 ### Inference backend
 
@@ -632,7 +650,7 @@ Each milestone ends with something runnable and tested. Do not begin the next un
 | # | Milestone | Done when |
 |---|-----------|-----------|
 | M0 | Scaffold: pyproject, config, logging, AppContext, registry, protocols, CI | `farmhub --version` runs, an empty module loads, CI green |
-| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs pinned by revision and a fitting model profile verified against measured numbers (§2), evaluated on the dev PC's 5090 — the Phase 1 runtime host, where it stays. Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
+| M1 | llm + FastAPI + /v1/chat/completions | HA conversation agent gets an answer from vLLM. Model IDs pinned by revision and a fitting model profile verified against measured numbers (§2), evaluated on the dev PC's 5090 — the Phase 1 runtime host, where it stays. **Three evaluation runs, one per candidate at `kv_cache_dtype = "auto"`** (v1.5 row 1; fp8 buys room this system does not need). `deploy/vllm/.env` is rendered from the chosen profile, not hand-written. Satellite identity reaches FarmHub (§14 Q1), with the bearer token and server-minted sessions of §3.6 |
 | M2 | Storage, migrations, records | Service events insert and query by CLI. JSONL audit sink implemented alongside the Postgres sink and its catch-up (Q8) |
 | M3 | ingest: parse, chunk, embed, manifest | Corpus indexes; rerun is a no-op; library check lints |
 | M4 | rag: hybrid retrieval + rerank + search_documents | Cited answers from manuals, with pages |
@@ -691,6 +709,8 @@ Known unresolved decisions. Raise each one at the milestone named, propose optio
 
 Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Home Assistant integration (`custom_components/farmhub/`) that forwards the utterance with the bearer token, `device_id` and `conversation_id` as headers. See `docs/DECISIONS.md`.
 
+Resolved: **Q9 (M1) — Phase 1 uptime is manual, and that is the decision.** Before gaming, vLLM is stopped (`vllm.sh down`); afterwards it is started and waited for (`vllm.sh up`, then `vllm.sh wait`). Nothing auto-starts after a Windows reboot: Docker Desktop and vLLM are both started by hand, which is why `restart: "no"` stays in the compose file. **While vLLM is down FarmHub stays up in degraded mode** — the `llm` module reports unhealthy and the registry retries with backoff (§6) — and a satellite is told FarmHub is unavailable rather than left waiting. Home Assistant's own intents and every automation keep working throughout, which is the whole reason `ha` is a separate machine (§2, §3.2): heating, pumps and irrigation do not depend on the GPU box being awake. `docs/RUNBOOK.md` carries the two shortcuts. See `docs/DECISIONS.md`.
+
 - **Q2 (M6): Action-verb and alias list for the classifier pre-pass.** Proposed source: derived automatically from tool names and descriptions in `config/tools/`, plus a hand-maintained Norwegian and English verb list.
 - **Q3 (M6): Rate limits for T0 and T1.** Only T2 has a default. Propose values.
 - **Q4 (M12): Preview rendering.** How the three PNG previews are rendered inside the sandbox (OpenSCAD's renderer, a headless mesh renderer, or CadQuery SVG export converted to PNG). Must not add a network-capable dependency to the sandbox.
@@ -698,4 +718,3 @@ Resolved: **Q1 (M1)** — satellite identity reaches FarmHub through a custom Ho
 - **Q6 (M8): Voice confirmation.** The fixed-intent form in §3.3 ("confirm" / "bekreft" handled deterministically by HA, calling the confirm endpoint with the satellite's `device_id`) is provisional. Settle: reading the exact arguments aloud in the confirmation prompt, what a stray "confirm" heard near a satellite can do, and behaviour with several pending actions.
 - **Q7 (M12): Printer stack.** Moonraker, OctoPrint or PrusaLink. Their upload APIs can start a print (a `print` flag or an auto-start queue); the upload client must never use either, with a test.
 - **Q8 (M2): Audit sink composition.** Leaning yes: JSONL is the mandatory write-ahead record (a failed JSONL write denies the call), and Postgres is written as well with idempotent catch-up from JSONL after an outage, so a database outage does not deny every tool.
-- **Q9 (M1): Phase 1 uptime.** The dev PC is the running system for about a year (§2), but it is not run like a server: vLLM is started by hand (`deploy/vllm/vllm.sh`, `restart: "no"` on purpose so a Docker Desktop restart cannot silently reclaim the card), and Windows reboots for updates whenever it likes. The same machine is also used for **gaming**, which wants the whole 5090 that vLLM has reserved — so vLLM cannot simply be left running, and "started by hand" is partly deliberate. Settle how gaming and serving coexist (stop vLLM and lose FarmHub for the evening, cap `gpu_memory_utilization` low enough for both, or accept that the two do not overlap), how vLLM and the FarmHub app come back after a reboot, and what a satellite hears while they are down — HA's own intents keep working (§3.2), so the answer may be "nothing, and FarmHub says it is unavailable", but that has to be chosen rather than discovered. To settle before the M1 end-to-end test through Home Assistant.

@@ -7,8 +7,9 @@ One short entry per architectural choice, dated. Status tags:
 - **Accepted (SPEC v1.2, 2026-09-20)**: differed from SPEC v1.1 and is now part of the accepted SPEC v1.2. The entry says which parts are implemented.
 - **Accepted (SPEC v1.3)**: part of the accepted SPEC v1.3 (2026-09-20), which amends §2 and §11 only.
 - **Accepted (SPEC v1.4, 2026-09-25)**: part of the accepted SPEC v1.4, which amends §2 and §11 and adds §14 Q9. No §3 rule is touched.
+- **Accepted (SPEC v1.5, 2026-09-25)**: part of the accepted SPEC v1.5, which amends §2, §11 and §14 only. No §3 rule is touched.
 
-SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule. SPEC v1.4 was accepted on 2026-09-25 and carries the two-phase hardware plan, the `nas`/`tv` split and §14 Q9.
+SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule. SPEC v1.4 was accepted on 2026-09-25 and carries the two-phase hardware plan, the `nas`/`tv` split and §14 Q9. SPEC v1.5, accepted the same day, carries the M1 evaluation's conclusions: the fp8 runs dropped, Q9 resolved, the monitor rule, and `server_args` on a profile.
 
 ---
 
@@ -254,6 +255,17 @@ The `nas` row in SPEC §2 described a machine that no longer matches the plan. `
 Both keep the old rule: **never an AI target.** Model inference runs on one machine at a time — the dev PC in Phase 1, `hub` in Phase 2 (see the entry below). A spare GPU in a media box is a standing temptation, and spreading inference across machines would make the runtime host's measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
 
 Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25)** with the revision as a whole.
+
+### 2026-09-25: Q9 resolved — Phase 1 uptime is manual, and deliberately so
+The dev PC is the running system for about a year and is not run like a server. Three questions were open: how gaming and serving share the 5090, how things come back after a Windows reboot, and what a satellite hears meanwhile. **Option A, manual, on all three.**
+
+- **Before gaming:** `./deploy/vllm/vllm.sh down`. **After:** `./deploy/vllm/vllm.sh up` then `wait`. Two Windows desktop shortcuts do it (`docs/RUNBOOK.md`). The alternative — capping `gpu_memory_utilization` low enough for both — was rejected: it would pay for gaming with KV cache every hour of every day, and the profile's measured numbers describe a card vLLM has to itself.
+- **After a reboot: nothing auto-starts.** Docker Desktop and vLLM are both started by hand, which is why `restart: "no"` stays in the compose file — a restart policy would reclaim the GPU silently, possibly in the middle of a game.
+- **While vLLM is down FarmHub stays up, degraded.** The `llm` module reports unhealthy and the registry retries with backoff (§6), so a satellite is told FarmHub is unavailable rather than left waiting for a timeout. Home Assistant's own intents and every automation keep working throughout: heating, pumps and irrigation never depended on the GPU box being awake, which is exactly why `ha` is a separate machine (§2, §3.2).
+
+The cost is accepted plainly: **FarmHub is unavailable while someone is gaming**, and nothing hides that. §1's open-question answering is a convenience; the safety-critical half lives in Home Assistant by design. What this must never become is an automation that starts vLLM when a game exits, or a policy that restarts it after a crash — both would put a 30 GB model back on the card at a moment nobody chose.
+
+**The monitor stays on the motherboard**, with games rendering on the 5090 through Windows' per-app graphics setting, so the card's baseline is 0 while FarmHub serves. Moving it to the 5090 costs ~1.66 GiB, which pushes the auxiliary models below `aux_reserve_gib` and would need `gpu_memory_utilization ≤ 0.79`. Recorded in SPEC §2 as a rule with a measured price, and it replaces v1.4's too-strong claim that the card "reads 0 MiB whenever vLLM is down" — true of this arrangement, not of the hardware. **Accepted (SPEC v1.5, 2026-09-25).**
 
 ### 2026-09-26: candidate A is the model — a refusal beats an action in the wrong room
 **Adopted: `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a`, profile from run `evals/2026-09-25T15-42-33Z`** (idle card, current harness), re-emitted with `server_args`. The block is in `config/farmhub.example.toml` and `docs/MODEL_EVAL.md`.
