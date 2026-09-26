@@ -24,6 +24,7 @@ from farmhub.core.context import AppContext
 from farmhub.core.errors import ConfigError
 from farmhub.core.logging import configure_logging, get_logger
 from farmhub.core.satellites import SatelliteRegistry, load_satellites
+from farmhub.core.serving import verify_settings
 from farmhub.core.sessions import SessionStore
 
 
@@ -55,6 +56,13 @@ def create_app(
             "no API token is configured. Set api.token_file, or FARMHUB_API__TOKEN. "
             "The chat endpoint authenticates Home Assistant with it (SPEC §3.6)"
         )
+
+    # A profile whose numbers describe a configuration vLLM is not started with is
+    # worse than no profile: it looks measured. Fails fast, like any config error
+    # (SPEC §6), and names keys rather than values (core/serving.py).
+    note = verify_settings(settings)
+    if note:
+        log.info("serving_env_unchecked", detail=note)
 
     satellites = load_satellites(settings.satellites.registry)
     # ``app`` lets a caller supply an already-wired application — the seam tests use to

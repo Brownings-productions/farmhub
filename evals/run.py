@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,16 @@ DATA = Path(__file__).resolve().parent / "data" / "candidates.json"
 LOGS = Path(__file__).resolve().parent / "results" / "logs"
 
 SERVED_NAME = "farmhub-eval"
-# Whisper, BGE-M3 and the reranker share the 5090 on the default single-GPU profile
-# (SPEC §2). Held back from vLLM's share so the measured numbers describe the real
-# arrangement, not a card with nothing else on it.
-AUX_RESERVE_GB = 5.0
+# Whisper, BGE-M3 and the reranker share the 5090 in Phase 1 (SPEC §2), the
+# arrangement FarmHub runs on until hub exists. Held back from vLLM's share so the
+# measured numbers describe the real arrangement, not a card with nothing else on it.
+#
+# This one figure is an ESTIMATE, unlike everything else the run records: no helper
+# model has been loaded and measured yet (M3, M4 and M9 do that). It is carried in the
+# results as such, and `nvidia-smi` readings taken while serving say how much the card
+# really has left beside vLLM — which is the number that will confirm or refute it.
+AUX_RESERVE_GIB = 5.0
+AUX_RESERVE_IS_ESTIMATE = True
 # SPEC §1 serves 2-3 concurrent voice users. The usable context is the KV cache
 # divided by this, not the configured max_model_len.
 CONCURRENT_SESSIONS = 3
@@ -53,11 +60,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--kv-dtype",
         action="append",
         default=[],
-        help="KV cache dtype to evaluate; repeatable. Default: auto and fp8 (SPEC §2)",
+        help=(
+            "KV cache dtype to evaluate; repeatable. Default: auto only. fp8 was dropped "
+            "from the M1 matrix (docs/DECISIONS.md 2026-09-25): at auto the KV cache "
+            "already holds twice max_model_len per session, so fp8 would trade quality "
+            "for room this system does not need. Pass --kv-dtype fp8 to measure it anyway."
+        ),
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--load-timeout", type=float, default=1800.0)
-    parser.add_argument("--card-total-gb", type=float, default=31.8)
+    parser.add_argument("--card-total-gib", type=float, default=31.84)
     return parser.parse_args(argv)
 
 
@@ -91,6 +103,13 @@ def check_pins(candidates: list[Candidate]) -> int:
             print(f"REFUSED  {exc}")
             failures += 1
             continue
+        # Advisory, but it saves a download: vLLM rejects a declared quantization that
+        # the checkpoint disagrees with, and only after the weights are on disk.
+        matches, reason = candidate.declared_quantization_matches()
+        if not matches:
+            print(f"MISMATCH {candidate.repo_id}: {reason}")
+            failures += 1
+            continue
         try:
             upstream = candidate.resolve_upstream_sha()
         except Exception as exc:  # noqa: BLE001 - reported, not fatal: may be offline
@@ -115,12 +134,44 @@ async def score(base_url: str) -> dict[str, Any]:
     }
 
 
+# Lines that name the kernel serving the *weights*. Everything else in the captured
+# kernel lines — FlashInfer sampling, autotune, the attention backend, the non-default
+# args echo — mentions kernel names too, and matching those reported the Mistral AWQ
+# fallback as "flashinfer" when its weights ran through Marlin (2026-09-25).
+QUANT_KERNEL = re.compile(
+    r"(LinearKernel|LinearMethod|MoE backend|no native FP4|quant_algo)",
+    re.I,
+)
+NOT_A_QUANT_KERNEL = re.compile(
+    r"(top-p|top-k|sampling|autotune|Autotuner|kernel_warmup|attention backend|non-default args)",
+    re.I,
+)
+
+
 def kernel_summary(startup: backend.Startup) -> str:
-    """One word for what actually ran, because a run can look like NVFP4 and not be."""
-    joined = " ".join(startup.kernel_lines).lower()
+    """One word for what actually served the weights.
+
+    A run can look like NVFP4 and not be (SPEC §2), so this reads only the lines that
+    name a weight kernel, and says so in the fallback's own terms rather than the
+    requested format's.
+    """
+    lines = [
+        line
+        for line in startup.kernel_lines
+        if QUANT_KERNEL.search(line) and not NOT_A_QUANT_KERNEL.search(line)
+    ]
+    joined = " ".join(lines).lower()
+    if not joined:
+        return "unknown"
+    # FP4 asked for, Marlin W4A16 delivered: the memory saving survives, the compute
+    # does not. Reported first because it is the case that matters most here.
     if "no native fp4" in joined or ("marlin" in joined and "fp4" in joined):
         return "marlin-fallback"
-    for token in ("modelopt", "flashinfer", "cutlass", "marlin", "awq", "gptq"):
+    if "marlin" in joined and "awq" in joined:
+        return "awq-marlin"
+    if "marlin" in joined and ("gptq" in joined or "compressed" in joined):
+        return "gptq-marlin"
+    for token in ("modelopt", "cutlass", "marlin", "flashinfer", "awq", "gptq"):
         if token in joined:
             return token
     return "unknown"
@@ -135,6 +186,19 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
     print(f"\n=== {candidate.name} ===")
     backend.write_env(candidate.env(SERVED_NAME))
     backend.down()
+
+    # What the card already holds before vLLM starts. Not always zero: the dev PC's
+    # monitor can be plugged into the 5090 rather than the motherboard, and a Windows
+    # desktop on this card costs ~1.7 GiB (docs/MODEL_EVAL.md, 2026-09-25). Every
+    # "in use while serving" reading includes it, so a run that does not record it
+    # cannot be compared with one that ran against a different baseline.
+    entry["baseline_gib"] = backend.memory_used_gib()
+    if entry["baseline_gib"]:
+        print(
+            f"  baseline: {entry['baseline_gib']} GiB already on the card before vLLM "
+            "started. WARNING: the memory readings below include it, and this run is not "
+            "comparable with one taken on an idle card."
+        )
     backend.up()
 
     serving = backend.wait_until_serving(args.port, args.load_timeout)
@@ -151,9 +215,13 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
 
     entry["loaded"] = True
     entry["served_models"] = backend.served_models(args.port)
+    # The outside view of the card, taken twice: once with the model loaded and idle,
+    # once after the concurrent long-context case, which is the heaviest thing the run
+    # does. The larger of the two is what "in use while serving" means.
+    entry["memory_used_gib_idle"] = backend.memory_used_gib()
     entry["usable_context_at_concurrency"] = startup.usable_context_at(CONCURRENT_SESSIONS)
     print(
-        f"  loaded: weights={startup.weights_gb} GB kv={startup.kv_cache_gb} GB "
+        f"  loaded: weights={startup.weights_gib} GiB kv={startup.kv_cache_gib} GiB "
         f"tokens={startup.kv_cache_tokens} kernel={entry['kernel']}"
     )
 
@@ -163,18 +231,53 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
         entry["scoring_error"] = f"{type(exc).__name__}: {exc}"
         print(f"  scoring failed: {exc}")
     finally:
+        # Read before the container goes down, or it measures an empty card.
+        entry["memory_used_gib_after_scoring"] = backend.memory_used_gib()
         backend.down()
 
-    entry["aux_reserve_gb"] = AUX_RESERVE_GB
+    readings = [
+        value
+        for value in (entry.get("memory_used_gib_idle"), entry.get("memory_used_gib_after_scoring"))
+        if value is not None
+    ]
+    entry["memory_used_gib_while_serving"] = max(readings) if readings else None
+    if entry["memory_used_gib_while_serving"] is not None:
+        left = round(args.card_total_gib - entry["memory_used_gib_while_serving"], 2)
+        entry["card_left_for_aux_gib"] = left
+        # What would be left on an idle card, so a run taken with a desktop on the GPU
+        # can still be read against one taken without. Reported beside the real figure,
+        # never instead of it: the desktop was really there.
+        baseline = entry.get("baseline_gib") or 0.0
+        entry["card_left_for_aux_gib_less_baseline"] = round(left + baseline, 2)
+        print(
+            f"  card in use while serving: {entry['memory_used_gib_while_serving']} GiB, "
+            f"leaving {left} GiB beside vLLM (aux_reserve estimate {AUX_RESERVE_GIB})"
+        )
+        if left < AUX_RESERVE_GIB:
+            print(
+                "  WARNING: less is left than aux_reserve_gib assumes, so the helper "
+                "models do not fit beside this profile as configured."
+            )
+    entry["aux_reserve_gib"] = AUX_RESERVE_GIB
+    entry["aux_reserve_is_estimate"] = AUX_RESERVE_IS_ESTIMATE
     # Recorded so a run states its own request settings: thinking was asked to be off,
     # and how many replies reasoned anyway despite that. A backend that ignores the
     # parameter cannot then pass as a clean result (docs/MODEL_EVAL.md).
     entry["chat_template_kwargs"] = dict(cases_common.CHAT_TEMPLATE_KWARGS)
+    entry["temperature"] = cases_common.TEMPERATURE
+    entry["server_args"] = candidate.server_args()
     entry["max_completion_tokens"] = {
         name: (entry.get(name) or {}).get("max_completion_tokens")
         for name in ("latency", "tools", "grounding", "classifier")
     }
     entry["reasoning_emitted"] = report.total(entry, "reasoning_emitted")
+    entry["unparsed_tool_calls_suspected"] = report.total(entry, "unparsed_tool_calls_suspected")
+    if entry["unparsed_tool_calls_suspected"]:
+        print(
+            f"  WARNING: {entry['unparsed_tool_calls_suspected']} repl(y|ies) look like a "
+            "tool call the server's --tool-call-parser did not recognise. The tool score "
+            "describes the parser, not the model."
+        )
     entry["truncated"] = report.total(entry, "truncated")
     if entry["reasoning_emitted"]:
         print(
@@ -186,7 +289,8 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    kv_dtypes = args.kv_dtype or ["auto", "fp8"]
+    # auto only: see docs/DECISIONS.md, 2026-09-25. fp8 stays available on request.
+    kv_dtypes = args.kv_dtype or ["auto"]
     matrix = Matrix.load(DATA)
     candidates = select(matrix, args.only, kv_dtypes)
 
@@ -208,15 +312,20 @@ def main(argv: list[str] | None = None) -> int:
     result: dict[str, Any] = {
         "run_id": identifier,
         "environment": {"vllm_image": backend.image_tag(), **backend.driver_info()},
-        "aux_reserve_gb": AUX_RESERVE_GB,
+        "aux_reserve_gib": AUX_RESERVE_GIB,
+        "aux_reserve_is_estimate": AUX_RESERVE_IS_ESTIMATE,
         "concurrent_sessions": CONCURRENT_SESSIONS,
-        "card_total_gb": args.card_total_gb,
+        "card_total_gib": args.card_total_gib,
+        # Sampling belongs in the run header: without it a score cannot be compared with
+        # another run's, which is what the first two runs learned the hard way.
+        "temperature": cases_common.TEMPERATURE,
+        "tool_repeats": tools.REPEATS,
         "candidates": [],
     }
 
     for candidate in candidates:
         entry = run_one(candidate, args)
-        entry["profile_toml"] = report.profile_toml(entry, identifier, args.card_total_gb)
+        entry["profile_toml"] = report.profile_toml(entry, identifier, args.card_total_gib)
         result["candidates"].append(entry)
 
     path = report.save(result, identifier)

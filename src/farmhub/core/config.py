@@ -57,12 +57,36 @@ class ModelProfile(BaseModel):
     kv_cache_dtype: Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
     gpu_memory_utilization: float = Field(gt=0.0, le=1.0)
     max_model_len: int = Field(gt=0)
-    weights_gb: float = Field(gt=0.0)
-    kv_cache_gb: float = Field(gt=0.0)
-    aux_reserve_gb: float = Field(ge=0.0)
-    card_total_gb: float = Field(gt=0.0)
-    # The evals run id that measured weights_gb and kv_cache_gb.
+    # GiB throughout, because that is the unit vLLM reports and the unit the eval
+    # records. Named _gib so nobody has to guess whether a conversion happened.
+    weights_gib: float = Field(gt=0.0)
+    kv_cache_gib: float = Field(gt=0.0)
+    aux_reserve_gib: float = Field(ge=0.0)
+    card_total_gib: float = Field(gt=0.0)
+    # The evals run id that measured weights_gib and kv_cache_gib.
     measured_by: str = Field(min_length=1)
+    # Request parameters the model needs to answer usefully, sent on every call
+    # (`modules/llm`). Required, because a model that reasons out loud by default
+    # produces no answer inside a sane token budget: with thinking left on, Qwen3.6
+    # scored 2 of 6 on part numbers purely by never finishing (docs/MODEL_EVAL.md).
+    # An empty table is allowed for a model that needs nothing, and is warned about at
+    # startup rather than passing silently.
+    chat_template_kwargs: dict[str, bool | int | str]
+    # Sampling, sent on every request that does not name its own. Required and not
+    # defaulted, because the alternative is the server's default: the first two eval
+    # runs took it and their tool scores were one unreproducible draw each
+    # (docs/MODEL_EVAL.md). A profile states what it was measured at, so the app serves
+    # the model the way the run scored it.
+    temperature: float = Field(ge=0.0, le=2.0)
+    # The server-side flags this profile was measured with, beyond the typed fields
+    # above: block size, tool-call parser, and anything model-specific such as
+    # candidate A's `--language-model-only`. Required, because these decide what is
+    # actually served and nothing else records them: drop that one flag and the vision
+    # tower loads, weights grow, the KV cache shrinks, and weights_gib/kv_cache_gib
+    # above become fiction while every check here still passes. `core/serving.py`
+    # renders deploy/vllm/.env from them and compares the file against them at startup.
+    # An empty list is allowed for a backend that needs no flags.
+    server_args: list[str]
 
     @model_validator(mode="after")
     def _check(self) -> "ModelProfile":
@@ -71,27 +95,29 @@ class ModelProfile(BaseModel):
                 f"revision must be a 40-character commit sha, got {self.revision!r}. "
                 "A tag or branch is not a pin (SPEC §2)"
             )
-        total = self.weights_gb + self.kv_cache_gb + self.aux_reserve_gb
-        if total > self.card_total_gb:
+        total = self.weights_gib + self.kv_cache_gib + self.aux_reserve_gib
+        if total > self.card_total_gib:
             raise ValueError(
-                f"budget exceeds the card: weights {self.weights_gb} + kv "
-                f"{self.kv_cache_gb} + aux {self.aux_reserve_gb} = {total:.2f} GB > "
-                f"{self.card_total_gb} GB"
+                f"budget exceeds the card: weights {self.weights_gib} + kv "
+                f"{self.kv_cache_gib} + aux {self.aux_reserve_gib} = {total:.2f} GiB > "
+                f"{self.card_total_gib} GiB"
             )
-        free_for_aux = (1.0 - self.gpu_memory_utilization) * self.card_total_gb
-        if free_for_aux < self.aux_reserve_gb:
+        free_for_aux = (1.0 - self.gpu_memory_utilization) * self.card_total_gib
+        if free_for_aux < self.aux_reserve_gib:
             raise ValueError(
                 f"gpu_memory_utilization {self.gpu_memory_utilization} leaves "
-                f"{free_for_aux:.2f} GB free, less than aux_reserve_gb "
-                f"{self.aux_reserve_gb}. vLLM would take memory the auxiliary models "
+                f"{free_for_aux:.2f} GiB free, less than aux_reserve_gib "
+                f"{self.aux_reserve_gib}. vLLM would take memory the auxiliary models "
                 "need (SPEC §2)"
             )
-        vllm_share = self.gpu_memory_utilization * self.card_total_gb
-        if self.weights_gb + self.kv_cache_gb > vllm_share:
+        vllm_share = self.gpu_memory_utilization * self.card_total_gib
+        if self.weights_gib + self.kv_cache_gib > vllm_share:
             raise ValueError(
-                f"weights + kv cache ({self.weights_gb + self.kv_cache_gb:.2f} GB) "
-                f"exceed vLLM's own share ({vllm_share:.2f} GB) at "
-                f"gpu_memory_utilization {self.gpu_memory_utilization}"
+                f"weights + kv cache ({self.weights_gib + self.kv_cache_gib:.2f} GiB) "
+                f"exceed vLLM's own share ({vllm_share:.2f} GiB) at "
+                f"gpu_memory_utilization {self.gpu_memory_utilization}. This check "
+                "ignores peak activation and CUDA graph memory, which also live inside "
+                "that share, so a profile that only just passes has not been tried"
             )
         return self
 
@@ -119,6 +145,11 @@ class LlmSettings(BaseModel):
     # How often the registry re-probes the backend. vLLM is not always running
     # (docs/RUNBOOK.md), so this is what notices it came back.
     health_interval_s: float = Field(default=30.0, gt=0.0)
+    # The vLLM server's environment file, compared against the active profile at startup
+    # and by `config check` (core/serving.py). Set to nothing to skip the check — which
+    # is right when the backend is Ollama or a test double, or when vLLM runs on another
+    # host whose .env this machine cannot see.
+    serving_env_file: Path | None = Path("deploy/vllm/.env")
 
 
 class ApiSettings(BaseModel):
@@ -232,6 +263,19 @@ class Settings(BaseSettings):
             "satellite_registry": str(self.satellites.registry or "<none: every request is T0>"),
             "llm_base_url": self.llm.base_url,
             "llm_profile": self.llm.profile or "<none>",
+            # What is sent on every request to keep the model answering rather than
+            # reasoning (docs/DECISIONS.md, 2026-09-23). Visible here because it decides
+            # whether answers are usable at all.
+            "llm_chat_template_kwargs": dict(profile.chat_template_kwargs)
+            if (profile := self.active_profile()) is not None
+            else "<no profile>",
+            # Sampling is a comparability question, not only a quality one: a score from
+            # an unpinned run cannot be compared with anything (docs/MODEL_EVAL.md).
+            "llm_temperature": profile.temperature if profile is not None else "<no profile>",
+            # What the server itself was started with. Printed because a profile that
+            # describes a different configuration than the one serving is the failure
+            # this field exists to prevent (core/serving.py).
+            "llm_server_args": list(profile.server_args) if profile is not None else "<no profile>",
         }
 
     def safety_warnings(self) -> list[tuple[str, str]]:
@@ -257,6 +301,16 @@ class Settings(BaseSettings):
                     "no_satellite_registry",
                     "no satellite registry is configured, so every request is served "
                     "T0-only (SPEC §3.6 fail closed)",
+                )
+            )
+        profile = self.active_profile()
+        if profile is not None and not profile.chat_template_kwargs:
+            warnings.append(
+                (
+                    "profile_declares_no_chat_template_kwargs",
+                    f"profile {self.llm.profile!r} sends no chat-template switches. If "
+                    "this model reasons out loud by default, answers will be truncated "
+                    "ramblings (docs/MODEL_EVAL.md)",
                 )
             )
         return warnings

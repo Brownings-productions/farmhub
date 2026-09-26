@@ -78,6 +78,8 @@ class OpenAICompatBackend:
         settings: LlmSettings,
         log: structlog.typing.FilteringBoundLogger,
         *,
+        chat_template_kwargs: Mapping[str, bool | int | str] | None = None,
+        temperature: float | None = None,
         http_client: Any = None,
     ) -> None:
         """``http_client`` is a seam for tests only.
@@ -85,9 +87,28 @@ class OpenAICompatBackend:
         It is typed loosely on purpose: the SDK's HTTP layer is its own business, and
         naming that type here would pin us to a transitive dependency that SPEC §12
         does not list.
+
+        ``chat_template_kwargs`` comes from the active model profile and is sent on
+        every request. For the M1 models that means turning thinking off: with it on,
+        the model spends the whole token budget reasoning and the answer never arrives
+        (docs/MODEL_EVAL.md). It is a profile field rather than a constant because the
+        next model may spell the switch differently.
+
+        ``temperature`` is the profile's measured sampling setting, used whenever a
+        caller does not name its own. Without it the backend's default applies, and a
+        default nobody declared is how the first two eval runs produced tool scores that
+        could not be compared with each other. With no profile — a test double or Ollama
+        — nothing is sent and the backend keeps its own default.
         """
         self._settings = settings
         self._log = log.bind(component="llm")
+        self._extra_body: dict[str, Any] | None = (
+            {"chat_template_kwargs": dict(chat_template_kwargs)} if chat_template_kwargs else None
+        )
+        self._chat_template_kwargs: Mapping[str, bool | int | str] = dict(
+            chat_template_kwargs or {}
+        )
+        self._temperature = temperature
         # Constructing the client opens no connection, so this is safe in build_app
         # before anything has started. The module owns the lifecycle.
         self._client = AsyncOpenAI(
@@ -106,6 +127,25 @@ class OpenAICompatBackend:
     @property
     def model(self) -> str:
         return self._settings.model
+
+    @property
+    def chat_template_kwargs(self) -> Mapping[str, bool | int | str]:
+        """The switches sent on every request, for logs and for tests of the wiring."""
+        return self._chat_template_kwargs
+
+    @property
+    def temperature(self) -> float | None:
+        """The profile's sampling setting, or None when no profile is configured."""
+        return self._temperature
+
+    def _sampling(self, explicit: float | None) -> Any:
+        """The temperature to send: the caller's, else the profile's, else nothing.
+
+        A caller that names a temperature wins, so a future call that needs a different
+        setting is not silently overridden by the profile.
+        """
+        chosen = explicit if explicit is not None else self._temperature
+        return chosen if chosen is not None else omit
 
     async def aclose(self) -> None:
         await self._client.close()
@@ -153,8 +193,9 @@ class OpenAICompatBackend:
                 model=self._settings.model,
                 messages=_as_params(messages),
                 tools=schemas if tools else omit,
-                temperature=temperature if temperature is not None else omit,
+                temperature=self._sampling(temperature),
                 max_completion_tokens=max_tokens if max_tokens is not None else omit,
+                extra_body=self._extra_body,
             )
         except (APIConnectionError, APITimeoutError) as exc:
             raise DependencyUnavailable(f"LLM backend unreachable: {exc}") from exc
@@ -196,8 +237,9 @@ class OpenAICompatBackend:
                 model=self._settings.model,
                 messages=_as_params(messages),
                 stream=True,
-                temperature=temperature if temperature is not None else omit,
+                temperature=self._sampling(temperature),
                 max_completion_tokens=max_tokens if max_tokens is not None else omit,
+                extra_body=self._extra_body,
             )
             async for chunk in stream:
                 if not chunk.choices:
@@ -234,6 +276,13 @@ class OpenAICompatBackend:
                         "strict": True,
                     },
                 },
+                # The classifier is the call most likely to break on reasoning: §4 wants
+                # one small JSON object, and a model that thinks first blows the budget
+                # before emitting it. It is also the call that most wants determinism:
+                # §4 routes an unparseable answer to `question`, so a sampled classifier
+                # is a pipeline that changes its mind between identical utterances.
+                temperature=self._sampling(None),
+                extra_body=self._extra_body,
             )
         except (APIConnectionError, APITimeoutError) as exc:
             raise DependencyUnavailable(f"LLM backend unreachable: {exc}") from exc

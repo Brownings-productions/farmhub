@@ -132,11 +132,14 @@ quantization = "modelopt_fp4"
 kv_cache_dtype = "auto"
 gpu_memory_utilization = 0.82
 max_model_len = 32768
-weights_gb = 17.5
-kv_cache_gb = 8.0
-aux_reserve_gb = 5.0
-card_total_gb = 31.8
+weights_gib = 17.5
+kv_cache_gib = 8.0
+aux_reserve_gib = 5.0
+card_total_gib = 31.8
 measured_by = "evals/2026-09-20T12-00-00Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+server_args = ["--block-size", "128", "--tool-call-parser", "hermes", "--language-model-only"]
 """
 
 
@@ -146,6 +149,86 @@ def test_a_measured_profile_loads(tmp_path: Path) -> None:
     assert profile is not None
     assert profile.repo_id == "nvidia/Qwen3.6-35B-A3B-NVFP4"
     assert settings.safety_summary()["llm_profile"] == "primary"
+    assert profile.chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_a_profile_without_chat_template_kwargs_fails_startup(tmp_path: Path) -> None:
+    """The switch that keeps the model answering is not optional (docs/DECISIONS.md).
+
+    Left to the model's default, Qwen3.6 reasons out loud and never reaches an answer
+    inside a sane token budget, so a profile that forgets this serves truncated
+    ramblings to a satellite.
+    """
+    toml = "\n".join(
+        line for line in GOOD_PROFILE.splitlines() if not line.startswith("chat_template_kwargs")
+    )
+    with pytest.raises(ConfigError, match="chat_template_kwargs"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_an_empty_chat_template_kwargs_loads_but_warns(tmp_path: Path) -> None:
+    """Some model may need no switch. That is a declaration, not an omission."""
+    toml = GOOD_PROFILE.replace(
+        "chat_template_kwargs = { enable_thinking = false }", "chat_template_kwargs = {}"
+    )
+    settings = load_settings(write_toml(tmp_path, toml))
+    assert settings.active_profile() is not None
+    events = [event for event, _ in settings.safety_warnings()]
+    assert "profile_declares_no_chat_template_kwargs" in events
+
+
+def test_the_startup_summary_shows_the_chat_template_switches(tmp_path: Path) -> None:
+    settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
+    assert settings.safety_summary()["llm_chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_a_profile_without_temperature_fails_startup(tmp_path: Path) -> None:
+    """The backend's own default is not an answer (docs/DECISIONS.md 2026-09-25).
+
+    Both M1 eval runs took it, and neither tool score could be compared with the other:
+    one case flipped between them and nothing in either run could say why.
+    """
+    toml = "\n".join(
+        line for line in GOOD_PROFILE.splitlines() if not line.startswith("temperature")
+    )
+    with pytest.raises(ConfigError, match="temperature"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_the_startup_summary_shows_the_sampling_temperature(tmp_path: Path) -> None:
+    settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
+    assert settings.safety_summary()["llm_temperature"] == 0.0
+
+
+def test_a_profile_without_server_args_fails_startup(tmp_path: Path) -> None:
+    """The flags decide what is actually served, and nothing else records them.
+
+    Drop candidate A's --language-model-only and the vision tower loads: weights grow,
+    the KV cache shrinks, and weights_gib/kv_cache_gib become fiction while every check
+    in this file still passes (docs/MODEL_EVAL.md, core/serving.py).
+    """
+    toml = "\n".join(
+        line for line in GOOD_PROFILE.splitlines() if not line.startswith("server_args")
+    )
+    with pytest.raises(ConfigError, match="server_args"):
+        load_settings(write_toml(tmp_path, toml))
+
+
+def test_an_empty_server_args_loads(tmp_path: Path) -> None:
+    """A backend that needs no flags is a declaration, not an omission."""
+    toml = GOOD_PROFILE.replace(
+        'server_args = ["--block-size", "128", "--tool-call-parser", "hermes", '
+        '"--language-model-only"]',
+        "server_args = []",
+    )
+    profile = load_settings(write_toml(tmp_path, toml)).active_profile()
+    assert profile is not None
+    assert profile.server_args == []
+
+
+def test_the_startup_summary_shows_the_server_flags(tmp_path: Path) -> None:
+    settings = load_settings(write_toml(tmp_path, GOOD_PROFILE))
+    assert "--language-model-only" in settings.safety_summary()["llm_server_args"]  # type: ignore[operator]
 
 
 @pytest.mark.parametrize("revision", ["main", "v1.0", "1355db6", "z" * 40])
@@ -166,15 +249,15 @@ def test_a_profile_without_measured_by_fails_startup(tmp_path: Path) -> None:
 
 
 def test_a_budget_larger_than_the_card_fails_startup(tmp_path: Path) -> None:
-    toml = GOOD_PROFILE.replace("weights_gb = 17.5", "weights_gb = 26.0")
+    toml = GOOD_PROFILE.replace("weights_gib = 17.5", "weights_gib = 26.0")
     with pytest.raises(ConfigError, match="exceed"):
         load_settings(write_toml(tmp_path, toml))
 
 
 def test_utilization_that_starves_the_auxiliary_models_fails_startup(tmp_path: Path) -> None:
-    """vLLM must leave aux_reserve_gb free for Whisper, BGE-M3 and the reranker."""
+    """vLLM must leave aux_reserve_gib free for Whisper, BGE-M3 and the reranker."""
     toml = GOOD_PROFILE.replace("gpu_memory_utilization = 0.82", "gpu_memory_utilization = 0.95")
-    with pytest.raises(ConfigError, match="aux_reserve_gb"):
+    with pytest.raises(ConfigError, match="aux_reserve_gib"):
         load_settings(write_toml(tmp_path, toml))
 
 

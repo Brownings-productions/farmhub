@@ -62,6 +62,127 @@ would have followed it on the next pull.
 Paste the result into `VLLM_REVISION`, and into the matching FarmHub profile. If a sha
 you already pinned has moved, find out what changed before following it.
 
+### The serving profile: what every field means
+
+A `[profiles.*]` block is a record of a measured evaluation run, not a set of knobs to
+tune. **The evals harness writes it; nobody types it** (`docs/MODEL_EVAL.md`), and
+`config check` refuses a profile that breaks any of the rules below.
+
+Memory fields are **GiB** — the unit vLLM reports and the eval records — which is why
+they are named `_gib`. No conversion happens anywhere:
+
+| Field | Comes from | Notes |
+|---|---|---|
+| `weights_gib` | vLLM's startup log | Carries over to `hub`: same card, same checkpoint |
+| `kv_cache_gib` | vLLM's startup log | Does **not** carry over: it is whatever was left on this machine (SPEC §2) |
+| `aux_reserve_gib` | declared | Whisper + BGE-M3 + reranker beside vLLM. ~5 in Phase 1, 0 on `hub`. Still an **estimate** — no helper model has been measured yet |
+| `card_total_gib` | `nvidia-smi` | 31.84 for the RTX 5090 (32,607 MiB) |
+
+Validation rejects `weights_gib + kv_cache_gib + aux_reserve_gib` over the card, a
+`gpu_memory_utilization` that does not leave `aux_reserve_gib` free, and
+`weights_gib + kv_cache_gib` over vLLM's own share. That last check ignores peak
+activation and CUDA graph memory (~1.2 GiB on the measured profile), so **a profile that
+only just passes has not actually been tried** — vLLM's own preflight is the real guard.
+
+Two fields are request parameters rather than memory, and both are required:
+
+- **`chat_template_kwargs`** is sent on every request, including the classifier's. For
+  the M1 candidates it is `{ enable_thinking = false }`. Leave thinking on and the model
+  spends its whole token budget reasoning: part-number grounding scored 2 of 6 by never
+  reaching an answer, and what a satellite reads aloud is a truncated ramble. It lives in
+  the profile because the next model may spell the switch differently. An empty table is
+  allowed and startup warns; a **missing** key fails startup.
+- **`temperature`** is what the profile was measured at, used whenever the caller names
+  none. Omitting it would mean the backend's own default, which is how two eval runs
+  produced tool scores that could not be compared with each other.
+
+Both are printed by `config check` and logged at startup, so a running FarmHub says on
+its first lines how it is sampling.
+
+### Phase 1: switching FarmHub off for gaming
+
+The dev PC is both the runtime host and the gaming machine, and the 5090 cannot do both at
+once. This is manual on purpose (SPEC §14 Q9): nothing auto-starts, so the card is never
+reclaimed at a moment nobody chose.
+
+**Set up once.** The monitor plugs into the **motherboard**, not the 5090 — that is what
+gives FarmHub the whole card, and a monitor on the 5090 costs ~1.66 GiB, which pushes the
+helper models below `aux_reserve_gib`. Games still render on the 5090: set each one to
+**High performance** in Windows → Settings → System → Display → Graphics.
+
+**Two desktop shortcuts.** `FarmHub OFF.bat`:
+
+```bat
+wsl bash -lc "cd ~/code/farmhub && ./deploy/vllm/vllm.sh down"
+```
+
+`FarmHub ON.bat`:
+
+```bat
+wsl bash -lc "cd ~/code/farmhub && ./deploy/vllm/vllm.sh up && ./deploy/vllm/vllm.sh wait"
+```
+
+`wait` blocks until `/health` answers, so the window closing means the model is actually
+serving rather than merely started. Expect a few minutes on a warm checkpoint cache.
+
+**Two rules.**
+
+- **Never use them during an evaluation run.** The harness brings vLLM up and down itself
+  and writes `deploy/vllm/.env` as it goes; interfering mid-run produces measurements that
+  describe neither candidate. Check first: `docker ps` showing `farmhub-vllm` while you did
+  not start it means a run owns it.
+- **Never start vLLM before `.env` has been regenerated from the active profile** — see
+  the next section. After any evaluation run that file holds the *last candidate measured*,
+  so starting it blind serves the wrong model.
+
+**What happens while it is off.** FarmHub keeps running, degraded: the `llm` module reports
+unhealthy, the registry retries with backoff, and a satellite is told FarmHub is unavailable
+instead of waiting for a timeout. Home Assistant's own intents and every automation keep
+working — heating, pumps and irrigation never depended on this machine being awake (SPEC §2,
+§3.2). Nothing needs restarting on the FarmHub side when vLLM comes back; the health probe
+notices within `llm.health_interval_s`.
+
+**After a Windows reboot**, nothing comes back by itself. Start Docker Desktop, then
+`FarmHub ON.bat`.
+
+### Switching the serving profile
+
+`deploy/vllm/.env` decides what vLLM actually serves. **Do not hand-edit it.** It is
+rendered from the chosen profile, because the two drifting apart is invisible otherwise:
+the eval harness rewrites that file for every candidate it runs, so after a matrix run it
+holds the *last candidate measured* rather than the one you chose.
+
+```sh
+uv run farmhub vllm env --profile primary          # print it, change nothing
+uv run farmhub vllm env --profile primary --write  # render deploy/vllm/.env
+./deploy/vllm/vllm.sh up && ./deploy/vllm/vllm.sh wait
+```
+
+Your own keys are read from the existing file and kept: `VLLM_IMAGE_TAG`, `HF_CACHE_DIR`,
+`VLLM_PORT`, `VLLM_BIND_HOST`, `VLLM_WSL2_ENABLE_PIN_MEMORY`. Everything the profile
+determines is replaced, so no flag survives from the model that was served before.
+
+**The check that makes it stick.** `farmhub config check` and server startup compare the
+file with the active profile and fail on a mismatch, naming the keys that differ and never
+printing a value — that file sits beside secrets. A missing file, no profile, or
+`llm.serving_env_file` unset means nothing was compared, and the output says so rather
+than implying a pass.
+
+```
+$ uv run farmhub config check
+error: deploy/vllm/.env does not match profile 'primary': VLLM_EXTRA_ARGS differ. …
+        Regenerate with `farmhub vllm env --profile primary --write`
+```
+
+Why it matters concretely: candidate A is a multimodal checkpoint run text-only, and the
+flag that keeps the vision tower out lives in `VLLM_EXTRA_ARGS`. Lose it and the tower
+loads — weights grow, the KV cache shrinks, and the profile's `weights_gib` and
+`kv_cache_gib` stop describing what is running, while every other check still passes
+(that validation is arithmetic over declared numbers, not a probe).
+
+It cannot stop you editing the file and running `vllm.sh up` by hand. It stops FarmHub
+*serving* against a configuration its profile never measured.
+
 ### Checkpoint cache and disk
 
 `HF_CACHE_DIR` must point inside the Linux filesystem (`~/.cache/huggingface`), never at

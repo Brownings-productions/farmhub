@@ -16,9 +16,12 @@ REPO = Path(__file__).parents[2]
 sys.path.insert(0, str(REPO))
 
 from evals import report  # noqa: E402
-from evals.backend import parse_startup  # noqa: E402
+from evals.backend import memory_used_gib, parse_startup  # noqa: E402
 from evals.cases import common  # noqa: E402
+from evals.cases import tools as tools_case  # noqa: E402
 from evals.cases.tools import _violations  # noqa: E402
+
+DATA_DIR = Path(__file__).resolve().parents[2] / "evals" / "data"
 from evals.profile import Candidate, Matrix, ProfileError  # noqa: E402
 
 SHA = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
@@ -60,6 +63,50 @@ def test_the_shipped_candidates_are_all_pinned() -> None:
         entry.validate()
 
 
+@pytest.mark.parametrize(
+    ("declared", "checkpoint", "matches"),
+    [
+        ("awq_marlin", "awq", True),
+        ("compressed-tensors", "compressed-tensors", True),
+        ("modelopt_fp4", "modelopt_fp4", True),
+        ("awq_marlin", "compressed-tensors", False),
+        ("gptq_marlin", "awq", False),
+    ],
+)
+def test_a_declared_quantization_is_compared_with_the_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, declared: str, checkpoint: str, matches: bool
+) -> None:
+    """vLLM rejects a mismatch only after the weights are downloaded.
+
+    stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ is a compressed-tensors checkpoint
+    despite the AWQ in its name, and a declared awq_marlin cost a 17 GB download before
+    the engine said so (2026-09-25). Compared on the family, since vLLM's argument names
+    are not the checkpoint's method names.
+    """
+    import io
+
+    body = io.BytesIO(json.dumps({"quantization_config": {"quant_method": checkpoint}}).encode())
+    body.__enter__ = lambda: body  # type: ignore[method-assign]
+    body.__exit__ = lambda *a: None  # type: ignore[method-assign]
+    monkeypatch.setattr("evals.profile.urllib.request.urlopen", lambda *a, **k: body)
+    ok, reason = candidate(quantization=declared).declared_quantization_matches()
+    assert ok is matches, reason
+
+
+def test_an_unreadable_checkpoint_config_does_not_block_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advisory, not a gate: offline must not stop a run, and the engine decides."""
+
+    def boom(*a: object, **k: object) -> None:
+        raise OSError("offline")
+
+    monkeypatch.setattr("evals.profile.urllib.request.urlopen", boom)
+    ok, reason = candidate().declared_quantization_matches()
+    assert ok is True
+    assert "could not read" in reason
+
+
 def test_the_matrix_expands_over_kv_dtypes() -> None:
     """SPEC §2: each candidate is measured at both dtypes, never assumed."""
     matrix = Matrix([candidate(name="a"), candidate(name="b")])
@@ -88,8 +135,8 @@ INFO 09-20 12:01:31 Maximum concurrency for 32,768 tokens per request: 3.00x
 
 def test_the_memory_numbers_come_from_the_startup_log(tmp_path: Path) -> None:
     startup = parse_startup(LOG, tmp_path / "x.log")
-    assert startup.weights_gb == 17.42
-    assert startup.kv_cache_gb == 8.10
+    assert startup.weights_gib == 17.42
+    assert startup.kv_cache_gib == 8.10
     assert startup.kv_cache_tokens == 98304
     assert startup.max_concurrency == 3.00
 
@@ -103,8 +150,8 @@ def test_usable_context_is_the_cache_divided_by_concurrent_sessions() -> None:
 def test_an_unparsed_number_stays_none_rather_than_zero(tmp_path: Path) -> None:
     """A missing number must be visible. Zero would look like a measurement."""
     startup = parse_startup("INFO nothing useful here\n", tmp_path / "x.log")
-    assert startup.weights_gb is None
-    assert startup.kv_cache_gb is None
+    assert startup.weights_gib is None
+    assert startup.kv_cache_gib is None
     assert startup.usable_context_at(3) is None
 
 
@@ -116,27 +163,184 @@ def test_the_kernel_actually_selected_is_captured(tmp_path: Path) -> None:
     assert "no native fp4" in joined
 
 
+# --- declined, or unparsed? -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[TOOL_CALLS] [{"name": "set_indoor_light", "arguments": {}}]',
+        '<tool_call>{"name": "set_indoor_light"}</tool_call>',
+        '{"name": "log_service_event", "arguments": {"hours": 12}}',
+    ],
+)
+def test_a_reply_that_contains_a_call_the_server_could_not_read_is_flagged(content: str) -> None:
+    """Declining and emitting an unparsed call are opposite findings.
+
+    The Mistral fallback scored 0 on every positive case on 2026-09-25 and the record
+    could not say whether the model refused or the --tool-call-parser failed.
+    """
+    assert tools_case._looks_like_an_unparsed_call(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "Jeg kan ikke slå på lyset i fjøset — det området finnes ikke.",
+        "A Kubota L4240 weighs about 2,300 kg.",
+    ],
+)
+def test_a_plain_prose_answer_is_not_flagged(content: str) -> None:
+    assert not tools_case._looks_like_an_unparsed_call(content)
+
+
+def test_suspected_unparsed_calls_reach_the_run_level_summary() -> None:
+    """A counter that only exists per case is a counter nobody reads.
+
+    The fallback's replies each carried [TOOL_CALLS] text the server could not parse,
+    the per-case flag was set, and the run-level figure stayed 0 — so no warning fired
+    and a parser failure looked like a model refusing (2026-09-25).
+    """
+    results = [
+        {"ok": False, "unparsed_tool_call_suspected": True},
+        {"ok": True},
+        {"ok": False, "unparsed_tool_call_suspected": True},
+    ]
+    assert tools_case._pass_summary(results)["unparsed_tool_calls_suspected"] == 2
+
+
+# --- the baseline the run started from ------------------------------------------------
+
+
+def test_a_zero_baseline_is_plain_and_a_real_one_is_flagged() -> None:
+    """A desktop on the same card costs ~1.7 GiB and lands in every reading.
+
+    Two runs against different baselines are not comparable, so the table has to say
+    which each one had (docs/MODEL_EVAL.md, 2026-09-25).
+    """
+    assert report._baseline({"baseline_gib": 0.0}) == "0"
+    assert report._baseline({"baseline_gib": 1.64}) == "**1.64**"
+    assert report._baseline({}) == "?"
+
+
+# --- which kernel actually served the weights -----------------------------------------
+
+# Real lines, from the two logs of 2026-09-25.
+NVFP4_LINES = [
+    "INFO [__init__.py:1066] Using MarlinNvFp4LinearKernel for NVFP4 GEMM",
+    "INFO [nvfp4.py:304] Using 'MARLIN' NvFp4 MoE backend out of potential backends: "
+    "['FLASHINFER_TRTLLM', 'VLLM_CUTLASS', 'MARLIN']",
+    "WARNING [marlin.py:34] Your GPU does not have native support for FP4 computation",
+    "INFO [topk_topp_sampler.py:62] Using FlashInfer for top-p & top-k sampling.",
+    "INFO [kernel_warmup.py:266] Running FlashInfer autotune with 2048 tokens.",
+    "INFO [cuda.py:492] Using FLASH_ATTN attention backend out of potential backends: "
+    "['FLASH_ATTN', 'FLASHINFER']",
+]
+AWQ_LINES = [
+    "INFO [auto_awq.py:448] Using MarlinLinearKernel for AutoAWQMarlinLinearMethod",
+    "INFO [topk_topp_sampler.py:62] Using FlashInfer for top-p & top-k sampling.",
+    "INFO [kernel_warmup.py:266] Running FlashInfer autotune with 2048 tokens.",
+    "INFO [autotuner.py:972] flashinfer.jit: [Autotuner]: Autotuning process starts ...",
+    "INFO [cuda.py:492] Using FLASH_ATTN attention backend out of potential backends: "
+    "['FLASH_ATTN', 'FLASHINFER']",
+]
+
+
+def _summary_of(lines: list[str]) -> str:
+    from evals.backend import Startup
+    from evals.run import kernel_summary
+
+    startup = Startup(weights_gib=None, kv_cache_gib=None, kv_cache_tokens=None)
+    startup.kernel_lines = lines
+    return kernel_summary(startup)
+
+
+def test_the_nvfp4_marlin_fallback_is_named_as_such() -> None:
+    """SPEC §2: a run can look like NVFP4 and not be. The label must not be fooled."""
+    assert _summary_of(NVFP4_LINES) == "marlin-fallback"
+
+
+def test_an_awq_checkpoint_on_marlin_is_not_reported_as_flashinfer() -> None:
+    """The fallback's weights ran through Marlin; FlashInfer only sampled and autotuned.
+
+    Matching any line mentioning a kernel name reported this as "flashinfer"
+    (2026-09-25), which is the one thing this field exists to prevent.
+    """
+    assert _summary_of(AWQ_LINES) == "awq-marlin"
+
+
+def test_lines_that_name_no_weight_kernel_give_unknown() -> None:
+    """Better than a confident wrong answer about what served the weights."""
+    assert _summary_of(AWQ_LINES[1:]) == "unknown"
+    assert _summary_of([]) == "unknown"
+
+
+# --- the outside view of the card ------------------------------------------------------
+
+
+class _Ran:
+    """A stand-in for one `nvidia-smi` invocation."""
+
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_memory_used_is_read_in_gib(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nvidia-smi reports MiB; the profile and the table are GiB throughout."""
+    monkeypatch.setattr("evals.backend.subprocess.run", lambda *a, **k: _Ran(0, "26680\n"))
+    assert memory_used_gib() == 26.05
+
+
+@pytest.mark.parametrize("ran", [_Ran(1, ""), _Ran(0, ""), _Ran(0, "not a number\n")])
+def test_an_unreadable_card_is_none_rather_than_zero(
+    monkeypatch: pytest.MonkeyPatch, ran: _Ran
+) -> None:
+    """Zero would read as "the card is empty", which is a measurement, not a failure."""
+    monkeypatch.setattr("evals.backend.subprocess.run", lambda *a, **k: ran)
+    assert memory_used_gib() is None
+
+
 # --- emitting a profile (SPEC §2: measured, not estimated) ----------------------------
 
 
 def test_a_measured_candidate_emits_a_pasteable_profile() -> None:
     entry = {
         "candidate": candidate(name="qwen").__dict__,
-        "startup": {"weights_gb": 17.42, "kv_cache_gb": 8.1},
-        "aux_reserve_gb": 5.0,
+        "startup": {"weights_gib": 17.42, "kv_cache_gib": 8.1},
+        "aux_reserve_gib": 5.0,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     toml = report.profile_toml(entry, "evals/2026-09-20T12-00-00Z", 31.8)
     assert "[profiles.qwen]" in toml
     assert f'revision = "{SHA}"' in toml
-    assert "weights_gb = 17.42" in toml
+    assert "weights_gib = 17.42" in toml
     assert 'measured_by = "evals/2026-09-20T12-00-00Z"' in toml
+    # Both request parameters come from what the run actually sent, so the profile
+    # serves the model the way it was scored.
+    assert "chat_template_kwargs = { enable_thinking = false }" in toml
+    assert "temperature = 0.0" in toml
+
+
+def test_a_run_that_did_not_pin_sampling_emits_no_profile() -> None:
+    """A score taken at the backend's default belongs to no reproducible profile."""
+    entry = {
+        "candidate": candidate(name="qwen").__dict__,
+        "startup": {"weights_gib": 17.42, "kv_cache_gib": 8.1},
+        "aux_reserve_gib": 5.0,
+    }
+    toml = report.profile_toml(entry, "evals/run", 31.8)
+    assert tomllib.loads(toml) == {}
+    assert "no temperature" in toml
 
 
 def test_an_unmeasured_candidate_emits_no_profile_at_all() -> None:
     """The §2 rule exists to stop exactly this; a plausible guess would defeat it."""
     entry = {
         "candidate": candidate(name="qwen").__dict__,
-        "startup": {"weights_gb": None, "kv_cache_gb": None, "log_path": "captured.log"},
+        "startup": {"weights_gib": None, "kv_cache_gib": None, "log_path": "captured.log"},
     }
     toml = report.profile_toml(entry, "evals/run", 31.8)
     # Everything emitted is commented out, so pasting it defines no profile at all.
@@ -154,8 +358,10 @@ def test_the_emitted_profile_is_accepted_by_config_validation() -> None:
 
     entry = {
         "candidate": candidate(name="qwen", gpu_memory_utilization=0.82).__dict__,
-        "startup": {"weights_gb": 17.42, "kv_cache_gb": 8.1},
-        "aux_reserve_gb": 5.0,
+        "startup": {"weights_gib": 17.42, "kv_cache_gib": 8.1},
+        "aux_reserve_gib": 5.0,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     toml = report.profile_toml(entry, "evals/2026-09-20T12-00-00Z", 31.8)
     parsed = tomllib.loads(toml)["profiles"]["qwen"]
@@ -247,8 +453,8 @@ def test_the_parser_reads_the_v029_memory_lines(tmp_path: Path) -> None:
     so the numbers SPEC §2 requires to be measured go missing.
     """
     startup = parse_startup(V029_LOG, tmp_path / "log.txt")
-    assert startup.weights_gb == 19.55
-    assert startup.kv_cache_gb == 4.9
+    assert startup.weights_gib == 19.55
+    assert startup.kv_cache_gib == 4.9
     assert startup.kv_cache_tokens == 207842
     assert startup.max_concurrency == 6.34
 
@@ -259,7 +465,7 @@ def test_the_older_wording_still_parses(tmp_path: Path) -> None:
         "INFO GPU KV cache size: 100,000 tokens\n"
     )
     startup = parse_startup(older, tmp_path / "log.txt")
-    assert startup.weights_gb == 16.20
+    assert startup.weights_gib == 16.20
     assert startup.kv_cache_tokens == 100000
 
 
@@ -326,15 +532,15 @@ def test_the_run_table_shows_reasoning_and_answer_time() -> None:
     result = {
         "run_id": "r1",
         "environment": {"vllm_image": "i", "gpu": "g", "driver": "d", "memory_total": "m"},
-        "aux_reserve_gb": 5.0,
+        "aux_reserve_gib": 5.0,
         "concurrent_sessions": 3,
-        "card_total_gb": 31.8,
+        "card_total_gib": 31.8,
         "candidates": [
             {
                 "candidate": {"name": "c"},
                 "loaded": True,
                 "kernel": "marlin-fallback",
-                "startup": {"weights_gb": 19.55, "kv_cache_gb": 4.9, "kv_cache_tokens": 207842},
+                "startup": {"weights_gib": 19.55, "kv_cache_gib": 4.9, "kv_cache_tokens": 207842},
                 "usable_context_at_concurrency": 69280,
                 "latency": {
                     "cold_ttft_s": 0.4,
@@ -358,3 +564,127 @@ def test_the_run_table_shows_reasoning_and_answer_time() -> None:
     assert "61.0 / 38.0" in table
     assert report.total(result["candidates"][0], "reasoning_emitted") == 2
     assert report.total(result["candidates"][0], "truncated") == 1
+
+
+# --- sampling is pinned, and repeats make instability visible -------------------------
+
+
+def test_every_request_pins_temperature() -> None:
+    """Two runs disagreed about one tool case on the same weights (MODEL_EVAL.md)."""
+    body = common.payload("m", [{"role": "user", "content": "hei"}], max_completion_tokens=64)
+    assert body["temperature"] == 0.0
+
+
+def test_the_tool_score_is_reported_as_a_range() -> None:
+    assert report._range({"score_min": 0.75, "score_max": 0.88}) == "0.75 to 0.88"
+    assert report._range({"score_min": 0.75, "score_max": 0.75}) == "0.75"
+    assert report._range({"score": 0.5}) == "0.5"
+
+
+def test_out_of_enum_buckets_are_reported_separately() -> None:
+    """Substituting a real area is the dangerous outcome and needs its own number."""
+    cell = report._buckets({"out_of_enum": {"declined": 4, "substituted": 1, "invented": 0}})
+    assert cell == "4/1/0"
+
+
+# --- what the model did with a value that is not in the enum --------------------------
+
+AREA_SCHEMAS = {
+    "set_indoor_light": {
+        "properties": {"area": {"type": "string", "enum": ["kitchen", "workshop", "hall"]}},
+        "required": ["area"],
+    }
+}
+BARN_CASE = {"id": "out-of-enum-area", "out_of_enum_param": "area"}
+
+
+def test_declining_an_out_of_enum_request_is_its_own_bucket() -> None:
+    record = {"called": None}
+    assert tools_case._out_of_enum_bucket(BARN_CASE, record, AREA_SCHEMAS) == "declined"
+
+
+def test_substituting_a_different_real_area_is_distinguished_from_inventing_one() -> None:
+    """The 2026-09-23 failure: barn was asked for, workshop was called.
+
+    Schema-valid, audited as permitted, and the wrong room — which is why it must not be
+    counted with the invented values that §7's schema already stops.
+    """
+    substituted = {"called": "set_indoor_light", "args": {"area": "workshop"}}
+    invented = {"called": "set_indoor_light", "args": {"area": "barn"}}
+    assert tools_case._out_of_enum_bucket(BARN_CASE, substituted, AREA_SCHEMAS) == "substituted"
+    assert tools_case._out_of_enum_bucket(BARN_CASE, invented, AREA_SCHEMAS) == "invented"
+
+
+def test_a_case_with_no_enum_parameter_is_not_bucketed() -> None:
+    record = {"called": None}
+    assert tools_case._out_of_enum_bucket({"id": "plain"}, record, AREA_SCHEMAS) is None
+
+
+def test_the_out_of_enum_cases_cover_both_languages() -> None:
+    """A satellite in the barn is heard in Norwegian, so the cases have to be too."""
+    data = json.loads((DATA_DIR / "tools.json").read_text(encoding="utf-8"))
+    cases = [c for c in data["cases"] if "out_of_enum_param" in c]
+    assert len(cases) >= 5
+    assert any("fjøset" in c["utterance"] for c in cases)
+    assert any("garage" in c["utterance"] for c in cases)
+    enums = {
+        name: (schema["properties"].get(c["out_of_enum_param"]) or {}).get("enum")
+        for c in cases
+        for name, schema in (
+            (t["function"]["name"], t["function"]["parameters"]) for t in data["tools"]
+        )
+        if c["out_of_enum_param"] in schema["properties"]
+    }
+    # Every case names a parameter that some offered tool actually constrains by enum,
+    # or the bucketing would silently call everything "invented".
+    assert all(values for values in enums.values())
+
+
+def test_every_out_of_enum_case_has_an_in_enum_control() -> None:
+    """A decline must be attributable to the enum, not to the phrasing.
+
+    "Kan du skru på lyset i stabburet?" declined 3/3 and looked like correct enum
+    discipline. Its control — the same polite form naming the workshop, which *is* in the
+    enum — declined 2 of 3 too, so the model was refusing the phrasing (MODEL_EVAL.md,
+    2026-09-25). Every out-of-enum case needs that twin or its score means nothing.
+    """
+    data = json.loads((DATA_DIR / "tools.json").read_text(encoding="utf-8"))
+    cases = data["cases"]
+    needs_control = {c["id"] for c in cases if c.get("out_of_enum_param")}
+    controlled = {target for c in cases for target in c.get("control_for", [])}
+    assert needs_control - controlled == set()
+    # A control must itself expect a call, or it controls for nothing.
+    for case in cases:
+        if case.get("control_for"):
+            assert case.get("expect_tool") is not None, case["id"]
+
+
+def test_the_long_context_latency_prompt_is_rag_sized() -> None:
+    """M4 returns top-5 reranked chunks; prefill at that size is what Marlin taxes."""
+    data = json.loads((DATA_DIR / "latency.json").read_text(encoding="utf-8"))
+    contexts = data["long_context"]["contexts"]
+    for context in contexts:
+        # ~10,100 tokens as measured. The run records the server's own prompt_tokens;
+        # this only guards against the file being trimmed to something that no longer
+        # tests prefill.
+        assert 15000 < len(context) < 30000
+        assert "Nm" in context
+        assert any(maker in context for maker in ("SKF", "FAG", "NSK", "NTN"))
+
+
+def test_every_rag_stream_gets_its_own_cold_context() -> None:
+    """Sharing one context measures the prefix cache instead of load.
+
+    With a single context the three concurrent streams reused what the single stream had
+    just cached and came out *faster* than it (docs/MODEL_EVAL.md, 2026-09-25). So there
+    has to be one context per stream, each differing from its first line.
+    """
+    data = json.loads((DATA_DIR / "latency.json").read_text(encoding="utf-8"))
+    contexts = data["long_context"]["contexts"]
+    assert len(contexts) >= data["concurrent"] + 1
+    assert len(set(contexts)) == len(contexts)
+    # Differing somewhere is not enough: a shared opening is a shared prefix.
+    assert len({c.splitlines()[0] for c in contexts}) == len(contexts)
+    # Same size, or the comparison between them is not a comparison.
+    lengths = [len(c) for c in contexts]
+    assert (max(lengths) - min(lengths)) / min(lengths) < 0.1

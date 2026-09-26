@@ -17,11 +17,11 @@
       "name": "qwen3-30b-a3b-2507-awq",
       "repo_id": "stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ",
       "revision": "d1a5d0d183a72483152c37ebdb88d4a015a3c8ea",
-      "quantization": "awq_marlin",
+      "quantization": "compressed-tensors",
       "block_size": 16,
       "max_model_len": 32768,
       "gpu_memory_utilization": 0.82,
-      "notes": "Candidate B. No vendor NVFP4 build of Instruct-2507 exists, so 4-bit is the realistic path for the model SPEC originally chose."
+      "notes": "Candidate B. No vendor NVFP4 build of Instruct-2507 exists, so 4-bit is the realistic path for the model SPEC originally chose. The checkpoint is compressed-tensors / pack-quantized (llm-compressor's AWQ output), not classic AWQ, despite the name: a declared awq_marlin made vLLM refuse it after the download on 2026-09-25. evals.run --check now compares the two beforehand."
     },
     {
       "name": "mistral-small-32-24b-awq",
@@ -32,7 +32,8 @@
       "max_model_len": 32768,
       "gpu_memory_utilization": 0.82,
       "tool_call_parser": "mistral",
-      "notes": "Fallback (SPEC §2). Community AWQ build; no official one exists. Revision resolved 2026-09-20."
+      "notes": "Fallback (SPEC §2). Community AWQ build; no official one exists. Revision resolved 2026-09-20. The checkpoint's own chat_template.jinja supports only user/system/assistant and renders no tools at all, so on 2026-09-25 the model was never told any tool existed and emitted no call in 51 attempts — the --tool-call-parser was never reached. vLLM's shipped tool_chat_template_mistral3.jinja renders [AVAILABLE_TOOLS] and [TOOL_CALLS] in the same [SYSTEM_PROMPT] dialect this checkpoint uses, so it is passed explicitly. One fix, one re-run: if tool calls still do not work it is recorded as not usable as configured on vLLM v0.29.0 (docs/MODEL_EVAL.md).",
+      "extra_args": "--chat-template /vllm-workspace/examples/tool_chat_template_mistral3.jinja"
     }
   ]
 }

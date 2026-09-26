@@ -1,5 +1,5 @@
 {
-  "_comment": "Synthetic tool schemas mirroring SPEC §7: enums, bounded numbers, explicit required, additionalProperties false. No real entity or script names.",
+  "_comment": "Synthetic tool schemas mirroring SPEC §7: enums, bounded numbers, explicit required, additionalProperties false. No real entity or script names. Every out_of_enum_param case has an in-enum control naming it in `control_for`, in the same language and phrasing: without one, a decline cannot be told apart from the model failing at the wording. 'Kan du skru på lyset i verkstedet?' found exactly that on 2026-09-25 (docs/MODEL_EVAL.md).",
   "tools": [
     {
       "type": "function",
@@ -18,11 +18,18 @@
             },
             "zone": {
               "type": "string",
-              "enum": ["beds", "benches", "propagator"],
+              "enum": [
+                "beds",
+                "benches",
+                "propagator"
+              ],
               "description": "Which greenhouse zone to water."
             }
           },
-          "required": ["duration_min", "zone"],
+          "required": [
+            "duration_min",
+            "zone"
+          ],
           "additionalProperties": false
         }
       }
@@ -38,10 +45,21 @@
           "properties": {
             "area": {
               "type": "string",
-              "enum": ["kitchen", "workshop", "hall"],
+              "enum": [
+                "kitchen",
+                "workshop",
+                "hall"
+              ],
               "description": "Which area's light."
             },
-            "state": {"type": "string", "enum": ["on", "off"], "description": "Desired state."},
+            "state": {
+              "type": "string",
+              "enum": [
+                "on",
+                "off"
+              ],
+              "description": "Desired state."
+            },
             "brightness_pct": {
               "type": "integer",
               "minimum": 10,
@@ -49,7 +67,11 @@
               "description": "Brightness percent."
             }
           },
-          "required": ["area", "state", "brightness_pct"],
+          "required": [
+            "area",
+            "state",
+            "brightness_pct"
+          ],
           "additionalProperties": false
         }
       }
@@ -65,12 +87,21 @@
           "properties": {
             "asset": {
               "type": "string",
-              "enum": ["kubota-l4240", "well-pump", "greenhouse-1"],
+              "enum": [
+                "kubota-l4240",
+                "well-pump",
+                "greenhouse-1"
+              ],
               "description": "Which asset."
             },
             "event": {
               "type": "string",
-              "enum": ["oil_change", "filter_change", "greasing", "inspection"],
+              "enum": [
+                "oil_change",
+                "filter_change",
+                "greasing",
+                "inspection"
+              ],
               "description": "What was done."
             },
             "hours": {
@@ -80,7 +111,11 @@
               "description": "Hour-meter reading."
             }
           },
-          "required": ["asset", "event", "hours"],
+          "required": [
+            "asset",
+            "event",
+            "hours"
+          ],
           "additionalProperties": false
         }
       }
@@ -91,13 +126,19 @@
       "id": "enum-and-bound",
       "utterance": "Vann benkene i drivhuset i ti minutter.",
       "expect_tool": "start_greenhouse_watering",
-      "expect_args": {"duration_min": 10, "zone": "benches"}
+      "expect_args": {
+        "duration_min": 10,
+        "zone": "benches"
+      }
     },
     {
       "id": "english-equivalent",
       "utterance": "Water the greenhouse beds for 5 minutes.",
       "expect_tool": "start_greenhouse_watering",
-      "expect_args": {"duration_min": 5, "zone": "beds"}
+      "expect_args": {
+        "duration_min": 5,
+        "zone": "beds"
+      }
     },
     {
       "id": "over-the-maximum",
@@ -110,13 +151,50 @@
       "id": "light-with-brightness",
       "utterance": "Skru på lyset på kjøkkenet på tjue prosent.",
       "expect_tool": "set_indoor_light",
-      "expect_args": {"area": "kitchen", "state": "on", "brightness_pct": 20}
+      "expect_args": {
+        "area": "kitchen",
+        "state": "on",
+        "brightness_pct": 20
+      },
+      "control_for": [
+        "out-of-enum-fjoset"
+      ]
+    },
+    {
+      "id": "in-enum-hall-norwegian",
+      "utterance": "Slå på lyset i gangen.",
+      "expect_tool": "set_indoor_light",
+      "expect_args": {
+        "area": "hall",
+        "state": "on"
+      },
+      "note": "The control for out-of-enum-loft: same verb ('Slå på'), Norwegian, area in the enum. Without it a decline on 'loftet' cannot be told apart from the model failing at the phrasing. Brightness is unscored: the utterance names none, and the schema makes the parameter required.",
+      "control_for": [
+        "out-of-enum-loft"
+      ]
+    },
+    {
+      "id": "in-enum-workshop-norwegian",
+      "utterance": "Kan du skru på lyset i verkstedet?",
+      "expect_tool": "set_indoor_light",
+      "expect_args": {
+        "area": "workshop",
+        "state": "on"
+      },
+      "note": "The control for out-of-enum-stabburet: same polite question form, Norwegian, area in the enum. Brightness is unscored: the utterance names none, and the schema makes the parameter required.",
+      "control_for": [
+        "out-of-enum-stabburet"
+      ]
     },
     {
       "id": "service-record",
       "utterance": "Log an oil change on the Kubota at 1240 hours.",
       "expect_tool": "log_service_event",
-      "expect_args": {"asset": "kubota-l4240", "event": "oil_change", "hours": 1240}
+      "expect_args": {
+        "asset": "kubota-l4240",
+        "event": "oil_change",
+        "hours": 1240
+      }
     },
     {
       "id": "no-such-tool",
@@ -128,13 +206,76 @@
       "id": "out-of-enum-area",
       "utterance": "Turn on the light in the barn.",
       "expect_tool": null,
-      "note": "barn is not in the area enum. Inventing it is a schema violation."
+      "note": "barn is not in the area enum. Declining is correct; substituting another real area (e.g. workshop) is worse than inventing 'barn', because it passes validation and acts in the wrong room.",
+      "out_of_enum_param": "area"
     },
     {
       "id": "plain-question",
       "utterance": "Hvor mye veier en Kubota L4240?",
       "expect_tool": null,
       "note": "A question, not an action. Calling a tool here is a false positive."
+    },
+    {
+      "id": "out-of-enum-fjoset",
+      "utterance": "Skru på lyset i fjøset.",
+      "expect_tool": null,
+      "out_of_enum_param": "area",
+      "note": "Norwegian for the barn. Same case as out-of-enum-area, in the language the satellites actually hear."
+    },
+    {
+      "id": "in-enum-kitchen-english",
+      "utterance": "Turn the light on in the kitchen.",
+      "expect_tool": "set_indoor_light",
+      "expect_args": {
+        "area": "kitchen",
+        "state": "on"
+      },
+      "note": "The control for out-of-enum-garage: same phrasing, English, area in the enum. Brightness is unscored: the utterance names none, and the schema makes the parameter required. It also controls for out-of-enum-area ('Turn on the light in the barn'), whose word order differs slightly but whose vocabulary is identical — close enough that a decline there cannot be blamed on the phrasing.",
+      "control_for": [
+        "out-of-enum-garage",
+        "out-of-enum-area"
+      ]
+    },
+    {
+      "id": "out-of-enum-garage",
+      "utterance": "Turn the light on in the garage.",
+      "expect_tool": null,
+      "out_of_enum_param": "area",
+      "note": "garage is not in the enum and is plausibly near the kitchen and hall that are — a substitution invitation."
+    },
+    {
+      "id": "out-of-enum-loft",
+      "utterance": "Slå på lyset på loftet.",
+      "expect_tool": null,
+      "out_of_enum_param": "area",
+      "note": "loft: not in the enum. Norwegian."
+    },
+    {
+      "id": "out-of-enum-stabburet",
+      "utterance": "Kan du skru på lyset i stabburet?",
+      "expect_tool": null,
+      "out_of_enum_param": "area",
+      "note": "stabbur (a farm storehouse): not in the enum, and no English cognate to fall back on."
+    },
+    {
+      "id": "in-enum-beds-english",
+      "utterance": "Water the beds for ten minutes.",
+      "expect_tool": "start_greenhouse_watering",
+      "expect_args": {
+        "zone": "beds",
+        "duration_min": 10
+      },
+      "note": "The control for out-of-enum-zone-lawn: same phrasing, English, zone in the enum.",
+      "control_for": [
+        "out-of-enum-zone-lawn"
+      ]
+    },
+    {
+      "id": "out-of-enum-zone-lawn",
+      "utterance": "Water the lawn for ten minutes.",
+      "expect_tool": null,
+      "out_of_enum_param": "zone",
+      "note": "The lawn is not a greenhouse zone. Substituting 'beds' waters the wrong thing for ten minutes, and the enum is the only thing standing in the way (SPEC §3.1)."
     }
   ]
 }

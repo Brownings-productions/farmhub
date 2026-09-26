@@ -58,6 +58,10 @@ connect_timeout_s = 5.0
 max_retries = 2
 # vLLM is not always running on the dev PC, so this is what notices it came back.
 health_interval_s = 30.0
+# The vLLM server's environment, compared against the active profile at startup. Unset it
+# when the backend is Ollama or a test double, or when vLLM runs on another host whose
+# .env this machine cannot see.
+serving_env_file = "deploy/vllm/.env"
 
 # --- measured serving profiles (SPEC §2) ----------------------------------------------
 #
@@ -65,25 +69,71 @@ health_interval_s = 30.0
 # evals harness emits this block; `measured_by` names the run that produced the
 # numbers, and a profile without one is rejected.
 #
+# Every memory figure is GiB, the unit vLLM reports and the eval records. Hence the
+# _gib suffix: no conversion happens anywhere.
+#
 # Validation at startup:
 #   - revision must be a 40-character commit sha. A tag is not a pin: one NVFP4
 #     upload of Qwen3.6-35B-A3B was silently replaced with weights that loop.
-#   - weights_gb + kv_cache_gb + aux_reserve_gb must fit on the card.
-#   - gpu_memory_utilization must leave aux_reserve_gb free for Whisper, BGE-M3 and
-#     the reranker, which share the 5090 on the default single-GPU profile.
-#   - weights_gb + kv_cache_gb must fit inside vLLM's own share of the card.
+#   - weights_gib + kv_cache_gib + aux_reserve_gib must fit on the card.
+#   - gpu_memory_utilization must leave aux_reserve_gib free for Whisper, BGE-M3 and
+#     the reranker, which share the card in Phase 1 (SPEC §2).
+#   - weights_gib + kv_cache_gib must fit inside vLLM's own share of the card. This
+#     check ignores peak activation and CUDA graph memory (~1.2 GiB on the measured
+#     profile), so a profile that only just passes has not actually been tried.
+#   - chat_template_kwargs must be present. It may be empty for a model that needs no
+#     switches, and startup then warns.
+#   - temperature must be present. The backend's own default is not an answer: the first
+#     two eval runs took it and neither tool score was reproducible.
+#   - server_args must be present. It records the flags vLLM was started with, and
+#     `config check` fails when deploy/vllm/.env disagrees with them. An empty list is
+#     allowed for a backend that needs none.
 #
-# The numbers below are illustrative only. Replace them with an evals run before use.
+# THE ADOPTED PROFILE (2026-09-25). Candidate A, measured on run
+# evals/2026-09-25T15-42-33Z against an idle card — see docs/MODEL_EVAL.md and
+# docs/DECISIONS.md. Copy the block below into config/farmhub.toml and uncomment it,
+# along with `profile = "primary"` in [llm] above. Then regenerate the server's
+# environment from it, or startup will refuse to serve:
+#
+#   uv run farmhub vllm env --profile primary --write
+#   uv run farmhub config check
+#
+# Do not edit the numbers. They are a record of a measurement; changing one makes the
+# profile describe a run that never happened.
 #
 # [profiles.primary]
 # repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
 # revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
 # quantization = "modelopt_fp4"
-# kv_cache_dtype = "auto"          # "auto" or "fp8"; M1 measures both (SPEC §2)
-# gpu_memory_utilization = 0.82
+# kv_cache_dtype = "auto"          # declared, never assumed (SPEC §2). M1 measured
+#                                  # "auto" only: at auto the KV cache already holds
+#                                  # twice max_model_len per session, so fp8 would buy
+#                                  # room this system does not need at a quality risk
+#                                  # (docs/DECISIONS.md, 2026-09-25)
+# gpu_memory_utilization = 0.82     # valid while the monitor is on the motherboard, so
+#                                  # the card's baseline is 0 (SPEC §2). A monitor moved
+#                                  # to the 5090 costs ~1.66 GiB and needs <= 0.79
 # max_model_len = 32768
-# weights_gb = 17.5                # measured
-# kv_cache_gb = 8.0                # measured
-# aux_reserve_gb = 5.0             # 0.0 on the optional dual-GPU profile
-# card_total_gb = 31.8             # RTX 5090, as the driver reports it
-# measured_by = "evals/2026-09-20T12-00-00Z"
+# weights_gib = 19.55               # measured, and reproduced across three runs
+# kv_cache_gib = 4.9                # measured -> 207,842 tokens, 69,280 per session at 3
+# aux_reserve_gib = 5.0             # estimate: ~5 in Phase 1, 0.0 on hub's two cards.
+#                                  # The one unmeasured number here (docs/MODEL_EVAL.md)
+# card_total_gib = 31.84            # RTX 5090: 32,607 MiB as the driver reports it
+# measured_by = "evals/2026-09-25T15-42-33Z"
+#
+# Sent on every request (modules/llm). Required, because with thinking left on this
+# model spends its whole token budget reasoning and the answer never arrives — it
+# scored 2 of 6 on part numbers by never finishing (docs/MODEL_EVAL.md). A future model
+# may spell the switch differently, which is why it lives in the profile.
+# chat_template_kwargs = { enable_thinking = false }
+#
+# Sampling, sent whenever a caller names none. What the evals run measured, so the app
+# serves the model the way it was scored.
+# temperature = 0.0
+#
+# The server-side flags this profile was measured with. deploy/vllm/.env is rendered from
+# these (`farmhub vllm env --write`) and checked against them at startup, so the model
+# that is served is the model that was scored. The last flag keeps the vision tower out
+# of this multimodal checkpoint: lose it and the KV cache shrinks while every check here
+# still passes.
+# server_args = ["--block-size", "128", "--max-num-seqs", "8", "--tool-call-parser", "hermes", "--language-model-only"]

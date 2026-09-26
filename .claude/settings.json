@@ -11,7 +11,31 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(./config/farmhub.toml)",
-      "Bash(git push --force:*)"
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Bash(git push --force:*)",
+      "Bash(sudo:*)",
+      "Bash(gh:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(git checkout -- :*)",
+      "Bash(git restore:*)",
+      "Bash(git branch -D:*)",
+      "Bash(rm -rf:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c 'import json,re,sys\ntry: cmd = (json.load(sys.stdin).get(\"tool_input\") or {}).get(\"command\") or \"\"\nexcept Exception: sys.exit(0)\nif re.search(r\"git\\s+push\", cmd):\n    print(json.dumps({\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Claude never runs git push in this repo (CLAUDE.md). Say a push is needed and stop.\"}}))'",
+            "statusMessage": "Checking for git push"
+          }
+        ]
+      }
     ]
   }
 }

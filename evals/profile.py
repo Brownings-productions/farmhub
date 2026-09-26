@@ -63,6 +63,39 @@ class Candidate:
         if self.max_model_len <= 0:
             raise ProfileError(f"{self.name}: max_model_len must be positive")
 
+    def declared_quantization_matches(self, timeout_s: float = 20.0) -> tuple[bool, str]:
+        """Compare the declared ``quantization`` with the checkpoint's own config.
+
+        vLLM refuses a mismatch outright, and it refuses it *after* the weights are on
+        disk: `stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ` is a `compressed-tensors`
+        checkpoint despite the AWQ in its name, and a declared `awq_marlin` cost a 17 GB
+        download before the engine said so (2026-09-25). Reads the repository's
+        `config.json` over the API, so `--check` can say it beforehand.
+
+        Returns whether it matches and a human-readable reason. A config that cannot be
+        read is reported as a match: this is a convenience check, not a gate, and the
+        engine remains the authority.
+        """
+        url = f"https://huggingface.co/{self.repo_id}/resolve/{self.revision}/config.json"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as response:
+                config: dict[str, Any] = json.loads(response.read())
+        except Exception as exc:  # noqa: BLE001 - advisory only; the engine decides
+            return True, f"could not read config.json ({exc})"
+        method = (config.get("quantization_config") or {}).get("quant_method")
+        if not isinstance(method, str):
+            return True, "checkpoint declares no quantization_config"
+        # vLLM's argument names are not the checkpoint's method names, so compare on the
+        # family rather than the string: awq_marlin serves an "awq" checkpoint.
+        family = self.quantization.split("_")[0].lower()
+        if method.lower().startswith(family) or family.startswith(method.lower()):
+            return True, f"checkpoint says {method}, declared {self.quantization}"
+        return False, (
+            f"checkpoint says quant_method={method!r} but the candidate declares "
+            f"quantization={self.quantization!r}. vLLM rejects the mismatch after "
+            "downloading the weights"
+        )
+
     def resolve_upstream_sha(self, timeout_s: float = 20.0) -> str:
         """What the repository's default branch points at right now.
 
@@ -77,6 +110,27 @@ class Candidate:
         if not isinstance(sha, str):
             raise ProfileError(f"{self.name}: could not read a sha for {self.repo_id}")
         return sha
+
+    def server_args(self) -> list[str]:
+        """The server flags this candidate runs with, beyond a profile's typed fields.
+
+        What goes into a profile's ``server_args`` (SPEC §2), so the chosen profile can
+        regenerate the exact serving environment it was measured with rather than
+        inheriting whatever the last candidate left in ``deploy/vllm/.env``.
+
+        ``--max-num-seqs`` is included although ``env()`` does not set it: compose
+        defaults it to 8, that default was in force for every measurement, and a profile
+        that does not say so would let it change silently.
+        """
+        args = [
+            "--block-size",
+            str(self.block_size),
+            "--max-num-seqs",
+            "8",
+            "--tool-call-parser",
+            self.tool_call_parser,
+        ]
+        return args + self.extra_args.split()
 
     def env(self, served_name: str = "farmhub-eval") -> dict[str, str]:
         """The deploy/vllm/.env this candidate corresponds to."""

@@ -4,6 +4,6 @@ Deliberately outside ``tests/``: it needs a real GPU and a real checkpoint, and 
 says no test may require a GPU. Nothing in CI runs this.
 
 What it produces is the evidence behind a ``[profiles.*]`` block in
-``config/farmhub.toml``: `weights_gb` and `kv_cache_gb` are measured here, and
+``config/farmhub.toml``: `weights_gib` and `kv_cache_gib` are measured here, and
 ``measured_by`` names the run that measured them.
 """

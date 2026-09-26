@@ -6,8 +6,10 @@ One short entry per architectural choice, dated. Status tags:
 - **Recorded**: decided now, implemented at the named milestone.
 - **Accepted (SPEC v1.2, 2026-09-20)**: differed from SPEC v1.1 and is now part of the accepted SPEC v1.2. The entry says which parts are implemented.
 - **Accepted (SPEC v1.3)**: part of the accepted SPEC v1.3 (2026-09-20), which amends §2 and §11 only.
+- **Accepted (SPEC v1.4, 2026-09-25)**: part of the accepted SPEC v1.4, which amends §2 and §11 and adds §14 Q9. No §3 rule is touched.
+- **Accepted (SPEC v1.5, 2026-09-25)**: part of the accepted SPEC v1.5, which amends §2, §11 and §14 only. No §3 rule is touched.
 
-SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule.
+SPEC references (§, item numbers) are to SPEC.md v1.1 and the M0 review of 2026-09-19. SPEC v1.2 was accepted on 2026-09-20 and folds in every decision dated 2026-09-19 below. SPEC v1.3, accepted the same day, carries the hardware change and touches no §3 rule. SPEC v1.4 was accepted on 2026-09-25 and carries the two-phase hardware plan, the `nas`/`tv` split and §14 Q9. SPEC v1.5, accepted the same day, carries the M1 evaluation's conclusions: the fp8 runs dropped, Q9 resolved, the monitor rule, and `server_args` on a profile.
 
 ---
 
@@ -186,7 +188,7 @@ Removed from SPEC §14. **In force (M1).**
 `evals/` lives outside `tests/` because it needs a real GPU and SPEC §9 forbids a test that does. It is run by hand; CI never touches it.
 
 - **Pins are checked before anything downloads.** A candidate whose `revision` is not a 40-character commit sha is refused and nothing is fetched. `--check` also reports when a pin has fallen behind upstream, so following a move is a decision rather than a surprise. This is the operational half of the §2 revision rule.
-- **The harness writes the `[profiles.*]` block.** `weights_gb` and `kv_cache_gb` come from vLLM's startup log and go straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
+- **The harness writes the `[profiles.*]` block.** `weights_gib` and `kv_cache_gib` come from vLLM's startup log, and `chat_template_kwargs` and `temperature` from what the request actually carried; all of it goes straight into a pasteable TOML block carrying `measured_by`. A human retyping them is exactly how "measured, not estimated" quietly becomes false. A candidate whose numbers could not be parsed gets no block at all, only a comment pointing at its log — a plausible guess there would defeat the rule the block exists to satisfy.
 - A test asserts the emitted block is accepted by `ModelProfile`, so the two halves cannot drift apart without the suite noticing.
 - **The kernel actually selected is recorded**, not the one requested, because an NVFP4 checkpoint on sm_120 can fall back to Marlin W4A16 and the run would otherwise look like NVFP4.
 - **Unparsed numbers stay `None`, never 0.0.** A zero looks like a measurement.
@@ -230,12 +232,98 @@ The first eval run never started: `--limit-mm-per-prompt {"image":0,"video":0}` 
 ### 2026-09-22: vLLM on WSL2 needs `VLLM_WSL2_ENABLE_PIN_MEMORY=1`
 The second run failed at device init with "UVA is not available". vLLM v0.29.0 turns pinned host memory off under WSL unless `VLLM_WSL2_ENABLE_PIN_MEMORY=1` is set (upstream opt-in, gated on WSL2 kernel ≥ 4.19.121; the dev PC runs 6.18), and the V2 model runner's staging buffers cannot be allocated without it. `compose.yaml` passes the variable through, defaulting to `0`. `env.example` sets it to `1` for the dev PC, and hub leaves it at `0`, where vLLM ignores it on native Linux anyway. Since this is the dev PC only, it has no bearing on the numbers the eval carries over to hub. **In force (M1, dev PC only).**
 
+### 2026-09-23: the hardware plan has two phases, and Phase 1 is the dev PC
+The plan is no longer "develop anywhere, then build `hub`". It is two named phases, and the first one lasts about a year.
+
+**Phase 1, now to roughly September 2027.** FarmHub is developed, measured **and run** on the dev PC's RTX 5090. An RTX 3070 cannot be added to that machine — the PSU will not take it — so the LLM and the helper models (faster-whisper, BGE-M3, the reranker, ~5 GB) share the one card, with `aux_reserve_gib ≈ 5`. This is the production profile for the next year, not a fallback and not a degradation, which is the part that matters for planning: it constrains **M3** (embedding while an LLM is loaded), **M4** (reranking on the same card) and **M9** (Whisper and Piper beside both) exactly as much as it constrains M1. Each of those milestones has to measure what it costs rather than assume there is room.
+
+**Phase 2, `hub`.** RTX 5090 32 GB **plus** RTX 3070 8 GB, decided rather than optional. The 5090 then serves the LLM alone, the helpers move to the 3070, and `aux_reserve_gib` becomes 0. The dev PC takes an RTX 5080 16 GB or a used RTX 4090 24 GB — undecided, settled at the swap — and from then on talks to vLLM on `hub` over the LAN, keeping a small-model local profile as the offline fallback.
+
+**A profile belongs to one machine.** `weights_gib` carries from the dev PC to `hub`, because it is the same card and the same checkpoint. `kv_cache_gib` does not: it is whatever is left once the helpers are elsewhere and no desktop is using the GPU. So **no Phase 2 profile is adopted until an eval run on `hub` produces it**, and the 2026-09-22/23 numbers are explicitly Phase 1 numbers.
+
+**Model inference runs on one machine at a time.** `nas`, `tv` and `ha` never run it, whatever GPU they hold. The only exception is wake-word detection on the satellites, which is a keyword spotter rather than a model FarmHub serves; §8.8 does not currently say where it runs and M9 settles it.
+
+**There is no overnight escape hatch.** An earlier draft of this said the LLM could be stopped overnight to make room for §8.4's contextual retrieval. It cannot: that batch job uses the local LLM to write its blurbs, so it is one more tenant on the shared card. Whether serving goes offline overnight at all is not decided here.
+
+**What Phase 1 does not settle** is uptime, recorded as SPEC §14 **Q9 (M1)**: the dev PC is the running system for a year, yet vLLM is started by hand (`restart: "no"` on purpose, `deploy/vllm/compose.yaml`) and Windows reboots for updates. How both come back, and what a satellite hears meanwhile, is settled before the M1 end-to-end test through Home Assistant.
+
+Supersedes the 2026-09-20 entry below, which wrote the 3070 out of the plan and made the second GPU conditional on M1's measurements. Part of SPEC v1.4, amending §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25).**
+
 ### 2026-09-23: storage and media split into `nas` and `tv`
 The `nas` row in SPEC §2 described a machine that no longer matches the plan. `nas` is now a new TrueNAS build — corpus, media and backups — starting on integrated graphics, with a transcoding GPU possible later. The existing TrueNAS box becomes `tv`, a TV and emulation machine that keeps its GTX 1060 until that card is upgraded, and is not part of the FarmHub system at all.
 
-Both keep the old rule: **never an AI target.** `hub` is the only machine that runs models. A spare GPU in a media box is a standing temptation, and spreading inference across machines would make `hub`'s measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
+Both keep the old rule: **never an AI target.** Model inference runs on one machine at a time — the dev PC in Phase 1, `hub` in Phase 2 (see the entry below). A spare GPU in a media box is a standing temptation, and spreading inference across machines would make the runtime host's measured memory budget (§2) meaningless while putting model serving behind a TV's uptime. The corpus is read over the network from `nas`; nothing about RAG needs a GPU there.
 
-Accepted as SPEC v1.4 (2026-09-23), amending §2 only — no §3 rule is touched. **Accepted (SPEC v1.4).**
+Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25)** with the revision as a whole.
+
+### 2026-09-25: Q9 resolved — Phase 1 uptime is manual, and deliberately so
+The dev PC is the running system for about a year and is not run like a server. Three questions were open: how gaming and serving share the 5090, how things come back after a Windows reboot, and what a satellite hears meanwhile. **Option A, manual, on all three.**
+
+- **Before gaming:** `./deploy/vllm/vllm.sh down`. **After:** `./deploy/vllm/vllm.sh up` then `wait`. Two Windows desktop shortcuts do it (`docs/RUNBOOK.md`). The alternative — capping `gpu_memory_utilization` low enough for both — was rejected: it would pay for gaming with KV cache every hour of every day, and the profile's measured numbers describe a card vLLM has to itself.
+- **After a reboot: nothing auto-starts.** Docker Desktop and vLLM are both started by hand, which is why `restart: "no"` stays in the compose file — a restart policy would reclaim the GPU silently, possibly in the middle of a game.
+- **While vLLM is down FarmHub stays up, degraded.** The `llm` module reports unhealthy and the registry retries with backoff (§6), so a satellite is told FarmHub is unavailable rather than left waiting for a timeout. Home Assistant's own intents and every automation keep working throughout: heating, pumps and irrigation never depended on the GPU box being awake, which is exactly why `ha` is a separate machine (§2, §3.2).
+
+The cost is accepted plainly: **FarmHub is unavailable while someone is gaming**, and nothing hides that. §1's open-question answering is a convenience; the safety-critical half lives in Home Assistant by design. What this must never become is an automation that starts vLLM when a game exits, or a policy that restarts it after a crash — both would put a 30 GB model back on the card at a moment nobody chose.
+
+**The monitor stays on the motherboard**, with games rendering on the 5090 through Windows' per-app graphics setting, so the card's baseline is 0 while FarmHub serves. Moving it to the 5090 costs ~1.66 GiB, which pushes the auxiliary models below `aux_reserve_gib` and would need `gpu_memory_utilization ≤ 0.79`. Recorded in SPEC §2 as a rule with a measured price, and it replaces v1.4's too-strong claim that the card "reads 0 MiB whenever vLLM is down" — true of this arrangement, not of the hardware. **Accepted (SPEC v1.5, 2026-09-25).**
+
+### 2026-09-26: candidate A is the model — a refusal beats an action in the wrong room
+**Adopted: `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a`, profile from run `evals/2026-09-25T15-42-33Z`** (idle card, current harness), re-emitted with `server_args`. The block is in `config/farmhub.example.toml` and `docs/MODEL_EVAL.md`.
+
+Candidate B was the better model on almost every axis: twice as fast to a whole answer (0.125 s against 0.259 s), 10/10 on classifier accuracy against A's 9/10, and it passed every positive tool case 3/3 including the two A fails. It was not chosen, and the reason is one number.
+
+**B substituted a real area in 15 of 18 out-of-enum attempts; A did so in 3.** A schema-valid call naming a room nobody asked about is the one tool-calling failure the schema cannot catch — §3.1's enums stop the model inventing an entity and it then picks an existing one instead. For a T2 tool the confirmation catches it, if the prompt reads back the resolved arguments (the 2026-09-25 entry below). **For a T1 tool nothing catches it**: T1 is auto-execute by design (§3.2), so a substituted area means the wrong light, or the wrong asset on a service record, with an audit row that looks perfectly ordinary. FarmHub would rather refuse and be asked again than act in a room nobody mentioned, so the trade is taken deliberately: A is slower and more stubborn, and it is wrong in the direction the rest of the system can absorb.
+
+The second reason is headroom. A holds 207,842 KV tokens, 69,280 per session at three concurrent — 2.1× its own `max_model_len`. B holds 33,029 per session against a `max_model_len` of 32,768, which is 1.008×: no room for a fourth session, a longer context, or the ~1.66 GiB a monitor on the 5090 would cost. A absorbs all three; B would need re-measuring for any of them.
+
+Grounding was 6/6 for both, so the precision that §2 cares about most did not decide it.
+
+**A's two known weaknesses, as M6 follow-ups** — both measured 0/3 across three passes, so neither is a fluke:
+
+- **The polite Norwegian form.** `Kan du skru på lyset i verkstedet?` — workshop, in the enum, a plain request — produced no tool call. Q2's action-verb pre-pass must handle `kan du`, `kunne du`, `vil du`, or real requests route to the question path. Its in-enum control is what exposed this; without it the matching out-of-enum case looked like correct enum discipline.
+- **The over-the-maximum request.** `Water the propagator for two hours` (120 minutes against a parameter maximum of 20) is declined rather than clamped or queried. Safe, and a poor experience: the right behaviour is to clamp to the maximum and say so, or ask. Belongs with M6's classifier and prompt work, and the §7 bound stays the backstop either way.
+
+**Not settled by this.** `aux_reserve_gib = 5.0` is still an estimate (M3/M4/M9 measure it), and the profile is a Phase 1 profile: `kv_cache_gib` does not carry to `hub` (SPEC §2). **Accepted (SPEC v1.5, 2026-09-25)** for the field list; the adoption itself is **In force (M1)**.
+
+### 2026-09-26: the profile is the single source of truth for the serving environment
+A profile recorded what was measured; `deploy/vllm/.env` decided what was served; nothing connected them. That gap is not theoretical — the eval harness rewrites that file for every candidate it runs, so after the 2026-09-25 matrix it held the Mistral fallback with the fallback's `--chat-template`, not candidate A. Starting vLLM for the M1 end-to-end test would have served the wrong model, and FarmHub would not have noticed: `probe()` compares the *served name*, which is the label `farmhub-primary`, not the checkpoint.
+
+The sharper version of the same gap: candidate A is a multimodal checkpoint run text-only (SPEC §2), and the flag that excludes the vision tower lived only in the candidate JSON and in `.env`. Drop it and the tower loads — weights grow, the KV cache shrinks, and the profile's `weights_gib`/`kv_cache_gib` stop describing what is running. Config validation still passes, because it is arithmetic over declared numbers rather than a probe.
+
+Three changes, and the profile becomes the record of a whole measured configuration rather than half of one:
+
+- **`ModelProfile.server_args: list[str]`, required.** The server-side flags the profile was measured with, beyond the typed fields: block size, max-num-seqs, tool-call parser, and anything model-specific. The harness emits it from the candidate's own `server_args()`, so nobody types it. An empty list is allowed for a backend that needs no flags. `--max-num-seqs 8` is recorded although the harness never set it: compose defaults it to 8, that default was in force for every measurement, and a profile that stayed silent would let it change unnoticed.
+- **`farmhub vllm env --profile <name> [--write]`** renders the model half of `.env` from a profile and keeps the operator's own keys (image tag, cache directory, port, bind address, the WSL2 pin-memory flag). `.env` stops being a file anyone edits.
+- **`farmhub config check` and server startup compare the file with the active profile and fail on a mismatch**, naming the keys that differ and never printing a value — the file sits beside secrets. No profile, no file, or `llm.serving_env_file` unset means nothing was compared, and the output says so rather than implying a pass, so Ollama and the test double still start.
+
+`core/serving.py` is the only place that knows the mapping, mirroring `deploy/vllm/compose.yaml`'s command; a flag added there is added here and then guarded. The honest limit: this cannot stop someone editing `.env` and running `vllm.sh up` by hand. It stops FarmHub *serving* against a configuration its profile never measured, which is the failure that would otherwise be silent.
+
+SPEC §2's profile field list gains `server_args`; that edit goes into v1.5. **Recorded (M1), implemented.**
+
+### 2026-09-25: the fp8 KV cache runs are dropped from the M1 matrix
+The matrix was six runs: three candidates at `kv_cache_dtype` `auto` and `fp8`. It is now three, at `auto` only.
+
+FP8 KV cache buys room in the KV cache. Candidate A at `auto` already has **207,842 KV tokens — about 69,000 per session at three concurrent sessions — against a `max_model_len` of 32,768**. The cache is not the binding constraint; it is more than twice what a session can even use. So fp8 would trade quality for room this system does not need, and SPEC §2 is explicit that "a memory win that costs part-number fidelity is not a win here" on an architecture with reported quality collapse at fp8.
+
+This does not retire the field. `kv_cache_dtype` stays a declared profile field, evaluated rather than assumed (SPEC §2), and fp8 becomes worth measuring the moment something changes the arithmetic: a model whose weights leave much less room, a larger `max_model_len` for RAG turns, or more than three concurrent sessions. The reason for skipping it is recorded here so that re-opening it is a decision rather than a rediscovery.
+
+**Amends SPEC §2's "M1 measures each candidate at the backend default and at FP8" and §11's M1 row**, both of which say both dtypes are measured. SPEC v1.4 was accepted before this decision, so the SPEC text still says six runs; fold this into the next revision. `evals/run.py` now defaults to `auto`, `--kv-dtype fp8` still works, and `config/farmhub.example.toml` no longer claims M1 measures both. **Recorded (M1), implemented.**
+
+### 2026-09-25: the memory beside vLLM is vLLM's own, not a desktop
+A correction, and the reason SPEC v1.4 was accepted with an amendment.
+
+Two figures were attributed to the Windows desktop: the **1.64 GiB** vLLM reported as already resident when its worker read the card (2026-09-23), and the **0.65 GiB** by which the measured `nvidia-smi` reading exceeds the sum of vLLM's profiled figures (2026-09-25). Neither is a desktop. The monitor runs on the motherboard's integrated graphics, and the 5090 reads **0 MiB whenever vLLM is down** — checked before and after the 2026-09-25 run. Nothing else is on the card.
+
+Both are therefore vLLM's own footprint outside the figures its profiler reports: CUDA context, library workspaces, allocator reserve. The logs do not say how it splits, so it is recorded as **"vLLM process overhead outside the profiled figures (unattributed)"** rather than guessed at, and the two numbers are not the same quantity and are not added. Settling it would need a third `nvidia-smi` reading between engine init and weight load; the two readings already answer the question that matters, which is how much is left.
+
+What this changes: the 1.64 GiB does **not** come back on `hub` — vLLM runs there too. What comes back on `hub` is `aux_reserve_gib` dropping to 0 with the helpers on the 3070. `docs/MODEL_EVAL.md` and SPEC §2 are corrected; §14 Q9's gaming contention is unaffected, since that is about who gets the card rather than a few hundred megabytes. **Recorded (M1).**
+
+### 2026-09-25: the profile carries its request parameters, and every memory field says GiB
+Two changes to `ModelProfile`, both from the M1 runs.
+
+**`chat_template_kwargs` and `temperature` are required profile fields**, sent by `modules/llm` on every request and used whenever a caller names no temperature of its own. Thinking-off is the reason for the first (see the entry below). Sampling is the reason for the second: the runs of 2026-09-22 and 2026-09-23 both took the server's default, so each tool score was one unreproducible draw and the two could not be compared with each other — one case flipped between them and nothing in either run could say why. A profile now states what it was measured at, the harness emits both fields from what the request actually carried, and an empty `chat_template_kwargs` is allowed but warned about. Neither is defaulted in code: a default nobody declared is exactly what produced the two incomparable runs.
+
+**Every memory field is renamed to the unit it was always in:** `weights_gib`, `kv_cache_gib`, `aux_reserve_gib`, `card_total_gib`. vLLM reports GiB, the eval records GiB, the validator compares GiB — but the fields said `_gb`, and the first write-up of the measurements duly mixed the two bases and reported a figure that was neither (`docs/MODEL_EVAL.md`). No profile has been adopted yet, so nothing in use breaks. Part of SPEC v1.4's §2 field list. **Recorded (M1), implemented.**
 
 ### 2026-09-23: thinking mode is switched off for serving, not just for the eval
 With Qwen3.6's thinking mode on, the model spent its whole token budget reasoning and never reached an answer: the 2026-09-22 run scored 0.33 on part-number grounding purely because every answer was cut off mid-thought. With `chat_template_kwargs {"enable_thinking": false}`, the same weights score 6/6 and return a complete answer in 0.225 s (0.41 s at three concurrent sessions).
@@ -243,6 +331,15 @@ With Qwen3.6's thinking mode on, the model spent its whole token budget reasonin
 So this is a serving requirement, not an eval detail. FarmHub's own client has to send it, or the first real voice question produces a truncated ramble; §1 answers are read aloud. **To implement at M1:** `modules/llm` sends it, and which switch a model needs belongs in the profile beside `quantization` — a future model may spell it differently.
 
 The eval harness also records whether a reply reasoned anyway, and warns, because the parameter is silently ignorable by a backend or a chat template, and a run that ignored it would otherwise look like a clean result. **Recorded (M1); the client change is still to do.**
+
+### 2026-09-25: a spoken confirmation reads back the gateway's resolved arguments
+A T2 confirmation prompt (§3.3) must state the arguments **the gateway resolved and stored**, not a paraphrase of what the person said. "Water the greenhouse benches for ten minutes — confirm?" is right; "shall I start the watering?" is not.
+
+The reason is measured rather than hypothetical. In the 2026-09-23 eval, "Turn on the light in the barn" produced `set_indoor_light(area="workshop")`: `barn` is not in the enum, so instead of declining the model substituted a *different real area*. Schema-valid, and the wrong room. A prompt built from the utterance, or from the model's own sentence, would have read back "the light" and been confirmed happily while the stored argument pointed somewhere else. The whole value of §3.3's "the arguments executed are the arguments stored in the PendingAction" is lost if the human confirms against a different set of words than the ones that will run.
+
+So the confirmation text is rendered from the PendingAction row — tool, area, duration, asset — by the gateway, never by the model, and it names each argument rather than summarising them. Where a value has no natural spoken form, the prompt says the value as stored rather than smoothing it.
+
+**Recorded (M5/M8).** M5 builds the gateway's policy checks and is where the rendering belongs; M8 builds the confirmation flow and is where it is tested, including the case where the resolved area differs from the area the person named. Ties into Q6, which settles the voice form.
 
 ### 2026-09-22: the NVFP4 Marlin fallback on sm_120 is confirmed, not theoretical
 SPEC §2 warned that NVFP4 on the RTX 5090 could fall back to Marlin W4A16. The first loading run of `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a` on `vllm/vllm-openai:v0.29.0` confirms it for both paths:
@@ -283,6 +380,8 @@ The inference backend is the official `vllm/vllm-openai` image, defined once in 
 ## Decided after M0 (2026-09-20)
 
 ### 2026-09-20: hub is a new single-GPU build; the 5090 is borrowed from the dev PC until it exists
+**Superseded by SPEC v1.4 (2026-09-23)** — see "the hardware plan has two phases" above. The topology below is still right; what changed is that the second GPU is a committed RTX 3070 rather than an optional 8–12 GB card decided after M1, that the dev PC is the runtime host for about a year rather than a development machine, and that its post-swap card is undecided. Kept because it is why the 3070 was written out of the plan and then back into it, and because the `aux_reserve_gb` rules below are unchanged and still in force.
+
 The hardware plan changed. hub is no longer the repurposed desktop: it is a new build that does not exist yet. There is one RTX 5090, currently in the dev PC (ClevatessPrime, Windows + WSL2); it moves to hub when hub is built, and the dev PC then takes an RTX 5080 16 GB. hub is specified with a free PCIe x16 slot and PSU headroom for an optional 8–12 GB auxiliary card, bought or not after M1 measures what the single-GPU profile leaves. The RTX 3070 is gone from the plan.
 
 Consequences, all in §2 and §11 only — **no §3 rule is touched**:
