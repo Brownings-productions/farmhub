@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,13 @@ def check_pins(candidates: list[Candidate]) -> int:
             print(f"REFUSED  {exc}")
             failures += 1
             continue
+        # Advisory, but it saves a download: vLLM rejects a declared quantization that
+        # the checkpoint disagrees with, and only after the weights are on disk.
+        matches, reason = candidate.declared_quantization_matches()
+        if not matches:
+            print(f"MISMATCH {candidate.repo_id}: {reason}")
+            failures += 1
+            continue
         try:
             upstream = candidate.resolve_upstream_sha()
         except Exception as exc:  # noqa: BLE001 - reported, not fatal: may be offline
@@ -126,12 +134,44 @@ async def score(base_url: str) -> dict[str, Any]:
     }
 
 
+# Lines that name the kernel serving the *weights*. Everything else in the captured
+# kernel lines — FlashInfer sampling, autotune, the attention backend, the non-default
+# args echo — mentions kernel names too, and matching those reported the Mistral AWQ
+# fallback as "flashinfer" when its weights ran through Marlin (2026-09-25).
+QUANT_KERNEL = re.compile(
+    r"(LinearKernel|LinearMethod|MoE backend|no native FP4|quant_algo)",
+    re.I,
+)
+NOT_A_QUANT_KERNEL = re.compile(
+    r"(top-p|top-k|sampling|autotune|Autotuner|kernel_warmup|attention backend|non-default args)",
+    re.I,
+)
+
+
 def kernel_summary(startup: backend.Startup) -> str:
-    """One word for what actually ran, because a run can look like NVFP4 and not be."""
-    joined = " ".join(startup.kernel_lines).lower()
+    """One word for what actually served the weights.
+
+    A run can look like NVFP4 and not be (SPEC §2), so this reads only the lines that
+    name a weight kernel, and says so in the fallback's own terms rather than the
+    requested format's.
+    """
+    lines = [
+        line
+        for line in startup.kernel_lines
+        if QUANT_KERNEL.search(line) and not NOT_A_QUANT_KERNEL.search(line)
+    ]
+    joined = " ".join(lines).lower()
+    if not joined:
+        return "unknown"
+    # FP4 asked for, Marlin W4A16 delivered: the memory saving survives, the compute
+    # does not. Reported first because it is the case that matters most here.
     if "no native fp4" in joined or ("marlin" in joined and "fp4" in joined):
         return "marlin-fallback"
-    for token in ("modelopt", "flashinfer", "cutlass", "marlin", "awq", "gptq"):
+    if "marlin" in joined and "awq" in joined:
+        return "awq-marlin"
+    if "marlin" in joined and ("gptq" in joined or "compressed" in joined):
+        return "gptq-marlin"
+    for token in ("modelopt", "cutlass", "marlin", "flashinfer", "awq", "gptq"):
         if token in joined:
             return token
     return "unknown"
@@ -146,6 +186,19 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
     print(f"\n=== {candidate.name} ===")
     backend.write_env(candidate.env(SERVED_NAME))
     backend.down()
+
+    # What the card already holds before vLLM starts. Not always zero: the dev PC's
+    # monitor can be plugged into the 5090 rather than the motherboard, and a Windows
+    # desktop on this card costs ~1.7 GiB (docs/MODEL_EVAL.md, 2026-09-25). Every
+    # "in use while serving" reading includes it, so a run that does not record it
+    # cannot be compared with one that ran against a different baseline.
+    entry["baseline_gib"] = backend.memory_used_gib()
+    if entry["baseline_gib"]:
+        print(
+            f"  baseline: {entry['baseline_gib']} GiB already on the card before vLLM "
+            "started. WARNING: the memory readings below include it, and this run is not "
+            "comparable with one taken on an idle card."
+        )
     backend.up()
 
     serving = backend.wait_until_serving(args.port, args.load_timeout)
@@ -191,6 +244,11 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
     if entry["memory_used_gib_while_serving"] is not None:
         left = round(args.card_total_gib - entry["memory_used_gib_while_serving"], 2)
         entry["card_left_for_aux_gib"] = left
+        # What would be left on an idle card, so a run taken with a desktop on the GPU
+        # can still be read against one taken without. Reported beside the real figure,
+        # never instead of it: the desktop was really there.
+        baseline = entry.get("baseline_gib") or 0.0
+        entry["card_left_for_aux_gib_less_baseline"] = round(left + baseline, 2)
         print(
             f"  card in use while serving: {entry['memory_used_gib_while_serving']} GiB, "
             f"leaving {left} GiB beside vLLM (aux_reserve estimate {AUX_RESERVE_GIB})"
@@ -212,6 +270,13 @@ def run_one(candidate: Candidate, args: argparse.Namespace) -> dict[str, Any]:
         for name in ("latency", "tools", "grounding", "classifier")
     }
     entry["reasoning_emitted"] = report.total(entry, "reasoning_emitted")
+    entry["unparsed_tool_calls_suspected"] = report.total(entry, "unparsed_tool_calls_suspected")
+    if entry["unparsed_tool_calls_suspected"]:
+        print(
+            f"  WARNING: {entry['unparsed_tool_calls_suspected']} repl(y|ies) look like a "
+            "tool call the server's --tool-call-parser did not recognise. The tool score "
+            "describes the parser, not the model."
+        )
     entry["truncated"] = report.total(entry, "truncated")
     if entry["reasoning_emitted"]:
         print(

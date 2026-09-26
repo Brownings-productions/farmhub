@@ -63,6 +63,50 @@ def test_the_shipped_candidates_are_all_pinned() -> None:
         entry.validate()
 
 
+@pytest.mark.parametrize(
+    ("declared", "checkpoint", "matches"),
+    [
+        ("awq_marlin", "awq", True),
+        ("compressed-tensors", "compressed-tensors", True),
+        ("modelopt_fp4", "modelopt_fp4", True),
+        ("awq_marlin", "compressed-tensors", False),
+        ("gptq_marlin", "awq", False),
+    ],
+)
+def test_a_declared_quantization_is_compared_with_the_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, declared: str, checkpoint: str, matches: bool
+) -> None:
+    """vLLM rejects a mismatch only after the weights are downloaded.
+
+    stelterlab/Qwen3-30B-A3B-Instruct-2507-AWQ is a compressed-tensors checkpoint
+    despite the AWQ in its name, and a declared awq_marlin cost a 17 GB download before
+    the engine said so (2026-09-25). Compared on the family, since vLLM's argument names
+    are not the checkpoint's method names.
+    """
+    import io
+
+    body = io.BytesIO(json.dumps({"quantization_config": {"quant_method": checkpoint}}).encode())
+    body.__enter__ = lambda: body  # type: ignore[method-assign]
+    body.__exit__ = lambda *a: None  # type: ignore[method-assign]
+    monkeypatch.setattr("evals.profile.urllib.request.urlopen", lambda *a, **k: body)
+    ok, reason = candidate(quantization=declared).declared_quantization_matches()
+    assert ok is matches, reason
+
+
+def test_an_unreadable_checkpoint_config_does_not_block_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advisory, not a gate: offline must not stop a run, and the engine decides."""
+
+    def boom(*a: object, **k: object) -> None:
+        raise OSError("offline")
+
+    monkeypatch.setattr("evals.profile.urllib.request.urlopen", boom)
+    ok, reason = candidate().declared_quantization_matches()
+    assert ok is True
+    assert "could not read" in reason
+
+
 def test_the_matrix_expands_over_kv_dtypes() -> None:
     """SPEC §2: each candidate is measured at both dtypes, never assumed."""
     matrix = Matrix([candidate(name="a"), candidate(name="b")])
@@ -117,6 +161,119 @@ def test_the_kernel_actually_selected_is_captured(tmp_path: Path) -> None:
     joined = " ".join(startup.kernel_lines).lower()
     assert "marlin" in joined
     assert "no native fp4" in joined
+
+
+# --- declined, or unparsed? -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[TOOL_CALLS] [{"name": "set_indoor_light", "arguments": {}}]',
+        '<tool_call>{"name": "set_indoor_light"}</tool_call>',
+        '{"name": "log_service_event", "arguments": {"hours": 12}}',
+    ],
+)
+def test_a_reply_that_contains_a_call_the_server_could_not_read_is_flagged(content: str) -> None:
+    """Declining and emitting an unparsed call are opposite findings.
+
+    The Mistral fallback scored 0 on every positive case on 2026-09-25 and the record
+    could not say whether the model refused or the --tool-call-parser failed.
+    """
+    assert tools_case._looks_like_an_unparsed_call(content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "",
+        "Jeg kan ikke slå på lyset i fjøset — det området finnes ikke.",
+        "A Kubota L4240 weighs about 2,300 kg.",
+    ],
+)
+def test_a_plain_prose_answer_is_not_flagged(content: str) -> None:
+    assert not tools_case._looks_like_an_unparsed_call(content)
+
+
+def test_suspected_unparsed_calls_reach_the_run_level_summary() -> None:
+    """A counter that only exists per case is a counter nobody reads.
+
+    The fallback's replies each carried [TOOL_CALLS] text the server could not parse,
+    the per-case flag was set, and the run-level figure stayed 0 — so no warning fired
+    and a parser failure looked like a model refusing (2026-09-25).
+    """
+    results = [
+        {"ok": False, "unparsed_tool_call_suspected": True},
+        {"ok": True},
+        {"ok": False, "unparsed_tool_call_suspected": True},
+    ]
+    assert tools_case._pass_summary(results)["unparsed_tool_calls_suspected"] == 2
+
+
+# --- the baseline the run started from ------------------------------------------------
+
+
+def test_a_zero_baseline_is_plain_and_a_real_one_is_flagged() -> None:
+    """A desktop on the same card costs ~1.7 GiB and lands in every reading.
+
+    Two runs against different baselines are not comparable, so the table has to say
+    which each one had (docs/MODEL_EVAL.md, 2026-09-25).
+    """
+    assert report._baseline({"baseline_gib": 0.0}) == "0"
+    assert report._baseline({"baseline_gib": 1.64}) == "**1.64**"
+    assert report._baseline({}) == "?"
+
+
+# --- which kernel actually served the weights -----------------------------------------
+
+# Real lines, from the two logs of 2026-09-25.
+NVFP4_LINES = [
+    "INFO [__init__.py:1066] Using MarlinNvFp4LinearKernel for NVFP4 GEMM",
+    "INFO [nvfp4.py:304] Using 'MARLIN' NvFp4 MoE backend out of potential backends: "
+    "['FLASHINFER_TRTLLM', 'VLLM_CUTLASS', 'MARLIN']",
+    "WARNING [marlin.py:34] Your GPU does not have native support for FP4 computation",
+    "INFO [topk_topp_sampler.py:62] Using FlashInfer for top-p & top-k sampling.",
+    "INFO [kernel_warmup.py:266] Running FlashInfer autotune with 2048 tokens.",
+    "INFO [cuda.py:492] Using FLASH_ATTN attention backend out of potential backends: "
+    "['FLASH_ATTN', 'FLASHINFER']",
+]
+AWQ_LINES = [
+    "INFO [auto_awq.py:448] Using MarlinLinearKernel for AutoAWQMarlinLinearMethod",
+    "INFO [topk_topp_sampler.py:62] Using FlashInfer for top-p & top-k sampling.",
+    "INFO [kernel_warmup.py:266] Running FlashInfer autotune with 2048 tokens.",
+    "INFO [autotuner.py:972] flashinfer.jit: [Autotuner]: Autotuning process starts ...",
+    "INFO [cuda.py:492] Using FLASH_ATTN attention backend out of potential backends: "
+    "['FLASH_ATTN', 'FLASHINFER']",
+]
+
+
+def _summary_of(lines: list[str]) -> str:
+    from evals.backend import Startup
+    from evals.run import kernel_summary
+
+    startup = Startup(weights_gib=None, kv_cache_gib=None, kv_cache_tokens=None)
+    startup.kernel_lines = lines
+    return kernel_summary(startup)
+
+
+def test_the_nvfp4_marlin_fallback_is_named_as_such() -> None:
+    """SPEC §2: a run can look like NVFP4 and not be. The label must not be fooled."""
+    assert _summary_of(NVFP4_LINES) == "marlin-fallback"
+
+
+def test_an_awq_checkpoint_on_marlin_is_not_reported_as_flashinfer() -> None:
+    """The fallback's weights ran through Marlin; FlashInfer only sampled and autotuned.
+
+    Matching any line mentioning a kernel name reported this as "flashinfer"
+    (2026-09-25), which is the one thing this field exists to prevent.
+    """
+    assert _summary_of(AWQ_LINES) == "awq-marlin"
+
+
+def test_lines_that_name_no_weight_kernel_give_unknown() -> None:
+    """Better than a confident wrong answer about what served the weights."""
+    assert _summary_of(AWQ_LINES[1:]) == "unknown"
+    assert _summary_of([]) == "unknown"
 
 
 # --- the outside view of the card ------------------------------------------------------

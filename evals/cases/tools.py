@@ -18,6 +18,7 @@ Scored separately, because the failures mean different things:
 from __future__ import annotations
 
 import json
+import re
 import statistics
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,22 @@ def _violations(name: str, args: dict[str, Any], schemas: dict[str, dict[str, An
         if required not in args:
             problems.append(f"missing required {required!r}")
     return problems
+
+
+UNPARSED_CALL = re.compile(
+    r"\[TOOL_CALLS\]|<tool_call>|<\|python_tag\|>|\"name\"\s*:\s*\"|\bfunction\s*[:=]",
+    re.I,
+)
+
+
+def _looks_like_an_unparsed_call(content: str) -> bool:
+    """Whether a reply with no parsed tool call looks like it contained one anyway.
+
+    Advisory: it distinguishes "the model declined" from "the server could not read what
+    the model emitted", which decides whether a low tool score says anything about the
+    model at all.
+    """
+    return bool(content) and bool(UNPARSED_CALL.search(content))
 
 
 def _out_of_enum_bucket(
@@ -129,10 +146,19 @@ async def _one_case(
     expected = case.get("expect_tool")
 
     if not calls:
+        # Keep what it said instead. A model that answers in prose has declined; one
+        # whose reply contains `[TOOL_CALLS]` or a bare JSON object *tried* to call a
+        # tool and the server's --tool-call-parser did not recognise it. Those are
+        # opposite findings and they were indistinguishable: the Mistral fallback
+        # scored 0 on every positive case on 2026-09-25 and nothing in the record said
+        # whether the model or the parser was at fault (docs/MODEL_EVAL.md).
+        content = message.get("content") or ""
         record.update(
             called=None,
             ok=expected is None,
             note="no tool call" + ("" if expected is None else f"; expected {expected}"),
+            content=content[:400],
+            unparsed_tool_call_suspected=_looks_like_an_unparsed_call(content),
         )
         record["out_of_enum"] = _out_of_enum_bucket(case, record, schemas)
         return record
@@ -188,6 +214,11 @@ def _pass_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "false_positives": sum(1 for r in results if "false positive" in str(r.get("note", ""))),
         "truncated": sum(1 for r in results if r.get("truncated")),
         "reasoning_emitted": sum(1 for r in results if r.get("reasoning")),
+        # If this is non-zero the tool score says nothing about the model: the server
+        # could not read the calls it emitted.
+        "unparsed_tool_calls_suspected": sum(
+            1 for r in results if r.get("unparsed_tool_call_suspected")
+        ),
         "out_of_enum": {
             bucket: sum(1 for r in results if r.get("out_of_enum") == bucket)
             for bucket in ("declined", "substituted", "invented")
@@ -238,6 +269,11 @@ async def run(
         "false_positives": sum(s["false_positives"] for s in summaries),
         "truncated": sum(s["truncated"] for s in summaries),
         "reasoning_emitted": sum(s["reasoning_emitted"] for s in summaries),
+        # Summed here as well, or the run-level warning never fires: the per-case flag
+        # was set on the Mistral fallback's replies while this stayed 0, so a tool score
+        # that described the parser rather than the model passed without comment
+        # (docs/MODEL_EVAL.md, 2026-09-25). Same class of bug as reasoning_emitted's.
+        "unparsed_tool_calls_suspected": sum(s["unparsed_tool_calls_suspected"] for s in summaries),
         "out_of_enum": {
             bucket: sum(s["out_of_enum"][bucket] for s in summaries)
             for bucket in ("declined", "substituted", "invented")

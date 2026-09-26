@@ -92,6 +92,14 @@ def _toml_inline(table: dict[str, Any]) -> str:
     return f"{{ {pairs} }}"
 
 
+def _baseline(entry: dict[str, Any]) -> str:
+    """What the card held before vLLM started, flagged when it is not zero."""
+    baseline = entry.get("baseline_gib")
+    if baseline is None:
+        return "?"
+    return "0" if not baseline else f"**{baseline}**"
+
+
 def _pair(single: object, loaded: object) -> str:
     """One cell for "alone / under load", so the gap is read at a glance."""
     left = single if single is not None else "?"
@@ -149,17 +157,17 @@ def markdown(result: dict[str, Any]) -> str:
         f"- Sampling: temperature {result.get('temperature', '?')}; tool cases repeated "
         f"{result.get('tool_repeats', '?')}x",
         "",
-        "| candidate | loaded | kernel | weights GiB | KV GiB | KV tokens | ctx @3 | "
-        "card used GiB | left for aux GiB | TTFT cold/warm | answer s 1/3 | "
-        "gen tok/s 1/3 | RAG answer s 1/3 | tools min-max | out-of-enum d/s/i | "
-        "grounding | classifier JSON | reasoning | truncated |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| candidate | loaded | kernel | baseline GiB | weights GiB | KV GiB | "
+        "KV tokens | ctx @3 | card used GiB | left for aux GiB | TTFT cold/warm | "
+        "answer s 1/3 | gen tok/s 1/3 | RAG answer s 1/3 | tools min-max | "
+        "out-of-enum d/s/i | grounding | classifier JSON | reasoning | truncated |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
 
     for entry in result["candidates"]:
         candidate = entry["candidate"]
         if not entry.get("loaded"):
-            lines.append(f"| `{candidate['name']}` | **no** |" + " — |" * 17)
+            lines.append(f"| `{candidate['name']}` | **no** |" + " — |" * 18)
             continue
         startup = entry.get("startup") or {}
         latency = entry.get("latency") or {}
@@ -180,6 +188,9 @@ def markdown(result: dict[str, Any]) -> str:
         truncations = total(entry, "truncated")
         lines.append(
             f"| `{candidate['name']}` | yes | {entry.get('kernel', '?')} | "
+            # A non-zero baseline means every memory figure in this row includes
+            # something that is not vLLM — usually a desktop on the same card.
+            f"{_baseline(entry)} | "
             f"{startup.get('weights_gib', '?')} | {startup.get('kv_cache_gib', '?')} | "
             f"{startup.get('kv_cache_tokens', '?')} | "
             f"{entry.get('usable_context_at_concurrency', '?')} | "
