@@ -2,8 +2,8 @@
 
 Which model FarmHub serves, and the measurements behind that choice.
 
-**Status: the whole matrix is measured (2026-09-25). No profile is chosen — that is the
-operator's call.** All three candidates loaded and were scored on the current harness at
+**Status: the matrix is measured and candidate A is adopted (2026-09-25).** The chosen
+profile is in §"Decision" at the end, and in `config/farmhub.example.toml`. All three candidates loaded and were scored on the current harness at
 `kv_cache_dtype = auto`; the matrix is **three runs, not six**, because the fp8 runs were
 dropped (§"The candidates"). Start at **§"Comparison across the matrix"**, which is the
 summary. In short: candidate A refuses too readily, candidate B does everything asked but
@@ -103,8 +103,8 @@ and figures are invented; nothing there should be believed outside this harness.
 
 ## Comparison across the matrix
 
-Three candidates, `kv_cache_dtype = auto`, on the current harness. **No profile is chosen
-here** — this is what was measured.
+Three candidates, `kv_cache_dtype = auto`, on the current harness. This is what was
+measured; **candidate A was adopted on the strength of it** (§"Decision").
 
 | | **A** `qwen36-35b-a3b-nvfp4` | **B** `qwen3-30b-a3b-2507-awq` | **fallback** `mistral-small-32-24b-awq` |
 |---|---|---|---|
@@ -456,7 +456,7 @@ Same single classifier disagreement: one ambiguous utterance read as `action` wh
 `question` was expected — which §4's safe default handles the other way round, so it is
 the harmless direction.
 
-#### Emitted profile (validated, not yet adopted)
+#### Emitted profile (this is the adopted one)
 
 Pasted through `ModelProfile` before being written here: **valid**. weights + kv = 24.45
 GiB against vLLM's 26.11 GiB share, budget + aux = 29.45 against a 31.84 GiB card, and
@@ -479,7 +479,7 @@ chat_template_kwargs = { enable_thinking = false }
 temperature = 0.0
 ```
 
-Still not adopted: candidate B and the fallback have not run, and `aux_reserve_gib` is still an estimate.
+**This is the profile that was adopted** (§"Decision"), re-emitted since with `server_args`. `aux_reserve_gib` remains an estimate until M3/M4/M9 measure it.
 
 ### Run `evals/2026-09-23T16-13-25Z` — candidate A, KV cache `auto`, thinking disabled
 
@@ -634,7 +634,7 @@ new harness before candidate B or the fallback is scored. Until that run exists,
 numbers to trust here are the memory figures and grounding, both of which reproduced
 across two runs; the tool score is a placeholder.
 
-### Emitted profile (not yet adopted)
+### Emitted profile (superseded: same weights, an older harness)
 
 ```toml
 [profiles.qwen36_35b_a3b_nvfp4]
@@ -760,35 +760,67 @@ Beyond the numbers, three things that were assumptions before:
 
 ## Decision
 
-**Open, and it is not the harness's call.** The matrix is measured; §"Comparison across the
-matrix" is the evidence. Both real candidates are viable and they are not better and worse
-versions of each other — they fail in opposite directions, so the choice is a judgement about
-which failure the rest of the system is better placed to absorb:
+**Candidate A is adopted (2026-09-25):** `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a`, the
+profile measured by run `evals/2026-09-25T15-42-33Z` on an idle card. The reasoning is in
+`docs/DECISIONS.md`; in short, **A refuses where B substitutes**, and for a T1 tool —
+auto-execute by design (§3.2) — nothing catches a substitution. A schema-valid call naming
+a room nobody asked about produces the wrong light and an audit row that looks ordinary.
+B was faster and better behaved on every positive case; it substituted a real area in 15 of
+18 out-of-enum attempts against A's 3, and that is the failure the rest of the system cannot
+absorb. A also has 2.1× its own `max_model_len` in KV headroom where B has 1.008×.
 
-- **Candidate A** has by far the most KV cache (69,280 tokens per session against a 32,768
-  `max_model_len`), the best out-of-enum discipline (15 of 18 declined) and perfect
-  grounding, but it refuses two requests it should honour — the over-the-maximum case and the
-  polite Norwegian form — 3 passes out of 3.
-- **Candidate B** is the fastest (0.125 s to a whole answer, warm TTFT 0.028 s), does
-  everything it is asked 3/3 including both cases A refuses, and is the only one 10/10 on
-  classifier accuracy — but it substitutes a real area in 15 of 18 out-of-enum attempts, and
-  its 33,029 tokens per session sit barely above its own `max_model_len`.
-- **The fallback** is not usable as configured on vLLM v0.29.0. Its numbers describe our
-  configuration, not the model.
+```toml
+[llm]
+profile = "primary"
 
-Whichever is chosen, the profile goes here, in `docs/DECISIONS.md` and in
-`config/farmhub.example.toml`, and `aux_reserve_gib` remains an estimate until M3/M4/M9
-measure it.
+[profiles.primary]
+repo_id = "nvidia/Qwen3.6-35B-A3B-NVFP4"
+revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5"
+quantization = "modelopt_fp4"
+kv_cache_dtype = "auto"
+gpu_memory_utilization = 0.82
+max_model_len = 32768
+weights_gib = 19.55
+kv_cache_gib = 4.9
+aux_reserve_gib = 5.0
+card_total_gib = 31.84
+measured_by = "evals/2026-09-25T15-42-33Z"
+chat_template_kwargs = { enable_thinking = false }
+temperature = 0.0
+server_args = ["--block-size", "128", "--max-num-seqs", "8", "--tool-call-parser", "hermes", "--language-model-only"]
+```
 
-**What the runs have already settled for the application**, whichever model wins:
+`gpu_memory_utilization = 0.82` holds because in Phase 1 the monitor stays on the
+motherboard and games render on the 5090 through Windows' per-app graphics setting, so the
+card's baseline is 0 while FarmHub serves (SPEC §2). Moving the monitor to the 5090 would
+cost ~1.66 GiB and need ≤ 0.79 — computed above, not adopted.
+
+**Before serving it,** regenerate the server's environment from the profile, or startup
+refuses:
+
+```sh
+uv run farmhub vllm env --profile primary --write
+uv run farmhub config check
+```
+
+**Two follow-ups for M6**, both measured 0/3 over three passes:
+
+- `Kan du skru på lyset i verkstedet?` — in the enum, a plain request, no tool call. Q2's
+  action-verb pre-pass needs the Norwegian polite interrogatives.
+- `Water the propagator for two hours` — 120 minutes against a maximum of 20 is declined
+  rather than clamped or queried. It should clamp and say so, or ask.
+
+**Still open:** `aux_reserve_gib = 5.0` is an estimate until M3/M4/M9 measure it, and this
+is a Phase 1 profile — `kv_cache_gib` does not carry to `hub` (SPEC §2).
+
+**What the runs settled for the application**, independently of the model:
 
 - FarmHub's client sends the thinking switch and the profile's temperature on every
   request, both required profile fields. Implemented (`docs/DECISIONS.md`, 2026-09-25).
 - A tool score is a range over repeated passes, not a number: `temperature: 0` does not
   make this stack repeatable.
-- The failure mode to design against is **substitution**, not invention. Every
-  out-of-enum failure so far was a schema-valid call in a real area nobody asked about,
-  which is a gateway and confirmation problem rather than a schema one.
+- The failure mode to design against is **substitution**, not invention — which is what
+  decided the model, and why a spoken confirmation reads back resolved arguments.
 - The §4 classifier pre-pass must handle Norwegian polite interrogatives (`kan du …`), or
   it will route real requests to the question path (Q2, M6).
 - Retrieved context for M4 belongs near SPEC §8.3's 4–5k tokens. At 10k, concurrent prefill
@@ -796,3 +828,5 @@ measure it.
 - A measurement is only comparable to another taken against the same card baseline. Every
   run now records one, because a desktop on this GPU costs ~1.66 GiB and silently entered
   one run's figures.
+- The profile, not `deploy/vllm/.env`, is the source of truth for what is served
+  (`core/serving.py`).

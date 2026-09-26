@@ -255,6 +255,24 @@ Both keep the old rule: **never an AI target.** Model inference runs on one mach
 
 Part of SPEC v1.4 (2026-09-23), which amends §2 and §11 only — no §3 rule is touched. **Accepted (SPEC v1.4, 2026-09-25)** with the revision as a whole.
 
+### 2026-09-26: candidate A is the model — a refusal beats an action in the wrong room
+**Adopted: `nvidia/Qwen3.6-35B-A3B-NVFP4` @ `1355db6a`, profile from run `evals/2026-09-25T15-42-33Z`** (idle card, current harness), re-emitted with `server_args`. The block is in `config/farmhub.example.toml` and `docs/MODEL_EVAL.md`.
+
+Candidate B was the better model on almost every axis: twice as fast to a whole answer (0.125 s against 0.259 s), 10/10 on classifier accuracy against A's 9/10, and it passed every positive tool case 3/3 including the two A fails. It was not chosen, and the reason is one number.
+
+**B substituted a real area in 15 of 18 out-of-enum attempts; A did so in 3.** A schema-valid call naming a room nobody asked about is the one tool-calling failure the schema cannot catch — §3.1's enums stop the model inventing an entity and it then picks an existing one instead. For a T2 tool the confirmation catches it, if the prompt reads back the resolved arguments (the 2026-09-25 entry below). **For a T1 tool nothing catches it**: T1 is auto-execute by design (§3.2), so a substituted area means the wrong light, or the wrong asset on a service record, with an audit row that looks perfectly ordinary. FarmHub would rather refuse and be asked again than act in a room nobody mentioned, so the trade is taken deliberately: A is slower and more stubborn, and it is wrong in the direction the rest of the system can absorb.
+
+The second reason is headroom. A holds 207,842 KV tokens, 69,280 per session at three concurrent — 2.1× its own `max_model_len`. B holds 33,029 per session against a `max_model_len` of 32,768, which is 1.008×: no room for a fourth session, a longer context, or the ~1.66 GiB a monitor on the 5090 would cost. A absorbs all three; B would need re-measuring for any of them.
+
+Grounding was 6/6 for both, so the precision that §2 cares about most did not decide it.
+
+**A's two known weaknesses, as M6 follow-ups** — both measured 0/3 across three passes, so neither is a fluke:
+
+- **The polite Norwegian form.** `Kan du skru på lyset i verkstedet?` — workshop, in the enum, a plain request — produced no tool call. Q2's action-verb pre-pass must handle `kan du`, `kunne du`, `vil du`, or real requests route to the question path. Its in-enum control is what exposed this; without it the matching out-of-enum case looked like correct enum discipline.
+- **The over-the-maximum request.** `Water the propagator for two hours` (120 minutes against a parameter maximum of 20) is declined rather than clamped or queried. Safe, and a poor experience: the right behaviour is to clamp to the maximum and say so, or ask. Belongs with M6's classifier and prompt work, and the §7 bound stays the backstop either way.
+
+**Not settled by this.** `aux_reserve_gib = 5.0` is still an estimate (M3/M4/M9 measure it), and the profile is a Phase 1 profile: `kv_cache_gib` does not carry to `hub` (SPEC §2). **Accepted (SPEC v1.5, 2026-09-25)** for the field list; the adoption itself is **In force (M1)**.
+
 ### 2026-09-26: the profile is the single source of truth for the serving environment
 A profile recorded what was measured; `deploy/vllm/.env` decided what was served; nothing connected them. That gap is not theoretical — the eval harness rewrites that file for every candidate it runs, so after the 2026-09-25 matrix it held the Mistral fallback with the fallback's `--chat-template`, not candidate A. Starting vLLM for the M1 end-to-end test would have served the wrong model, and FarmHub would not have noticed: `probe()` compares the *served name*, which is the label `farmhub-primary`, not the checkpoint.
 
